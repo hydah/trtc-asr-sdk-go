@@ -1,21 +1,8 @@
-# TRTC-ASR SDK
+# TRTC-ASR Go SDK
 
-基于 TRTC 鉴权体系的实时语音识别（ASR）SDK，通过 WebSocket 协议与 ASR 服务通信。
+基于 TRTC 鉴权体系的实时语音识别（ASR）Go SDK，通过 WebSocket 协议与 ASR 服务通信。
 
-## 支持语言
-
-| 语言 | 状态 | 路径 |
-|------|------|------|
-| Go | ✅ 已完成 | [Go SDK](#go-sdk) |
-| Python | ✅ 已完成 | [trtc-asr-sdk-python](https://github.com/trtc-asr/trtc-asr-sdk-python) |
-| Node.js | ✅ 已完成 | [trtc-asr-sdk-nodejs](https://github.com/trtc-asr/trtc-asr-sdk-nodejs) |
-
-## 支持功能
-
-| 功能 | 状态 |
-|------|------|
-| 实时语音识别 | ✅ 已完成 |
-| 一句话识别 (Flash) | 🔜 计划中 |
+> 其他语言 SDK：[Python](https://github.com/hydah/trtc-asr-sdk-python) | [Node.js](https://github.com/hydah/trtc-asr-sdk-nodejs)
 
 ## 前提条件
 
@@ -67,9 +54,7 @@
 
 ---
 
-## Go SDK
-
-### 安装
+## 安装
 
 ```bash
 go get github.com/trtc-asr/trtc-asr-sdk-go@latest
@@ -77,7 +62,7 @@ go get github.com/trtc-asr/trtc-asr-sdk-go@latest
 
 **要求**：Go 1.21+
 
-### 快速开始
+## 快速开始
 
 ```go
 package main
@@ -153,7 +138,7 @@ func main() {
 }
 ```
 
-### 凭证获取
+## 凭证获取
 
 | 参数 | 来源 | 说明 |
 |------|------|------|
@@ -161,7 +146,7 @@ func main() {
 | `SDKAppID` | [TRTC 控制台](https://console.cloud.tencent.com/trtc/app) > 应用管理 | TRTC 应用 ID |
 | `SecretKey` | [TRTC 控制台](https://console.cloud.tencent.com/trtc/app) > 应用概览 > SDK密钥 | 用于生成 UserSig，不会传输到网络 |
 
-### 配置项
+## 配置项
 
 | 方法 | 说明 | 默认值 |
 |------|------|--------|
@@ -178,7 +163,7 @@ func main() {
 | `SetMaxSpeakTime(ms)` | 强制断句时间 | 60000ms |
 | `SetVoiceID(id)` | 自定义 voice_id | 自动 UUID |
 
-### 引擎模型
+## 引擎模型
 
 | 类型 | 说明 |
 |------|------|
@@ -186,7 +171,7 @@ func main() {
 | `16k_zh` | 中文通用（推荐） |
 | `16k_zh_en` | 中英文通用 |
 
-### 示例
+## 示例
 
 完整示例请参见 [`examples/`](./examples/) 目录：
 
@@ -208,10 +193,10 @@ go run main.go -f ../../test.pcm
 go run main.go -h
 ```
 
-### 项目结构
+## 项目结构
 
 ```
-TRTC-ASR/
+trtc-asr-sdk-go/
 ├── common/                     # 公共模块
 │   ├── credential.go           # 凭证管理（APPID + SDKAppID + SDK密钥）
 │   ├── usersig.go              # TRTC UserSig 生成
