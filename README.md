@@ -1,6 +1,6 @@
 # TRTC-ASR Go SDK
 
-基于 TRTC 鉴权体系的实时语音识别（ASR）Go SDK，通过 WebSocket 协议与 ASR 服务通信。
+基于 TRTC 鉴权体系的语音识别（ASR）Go SDK，支持实时语音识别（WebSocket）和一句话识别（HTTP）两种模式。
 
 > 其他语言 SDK：[Python](https://github.com/hydah/trtc-asr-sdk-python) | [Node.js](https://github.com/hydah/trtc-asr-sdk-nodejs)
 
@@ -52,6 +52,41 @@
 | `max_speak_time` | 否 | Integer | 强制断句时间（ms），范围 5000-90000，默认 60000 |
 | `signature` | 是 | String | 接口签名参数，值与 X-TRTC-UserSig 一致 |
 
+### 一句话识别接口
+
+- **请求地址**：`https://asr.cloud-rtc.com/v1/SentenceRecognition?{请求参数}`
+- **请求方法**：HTTP POST，Content-Type 为 `application/json; charset=utf-8`
+
+#### URL 请求参数
+
+| 参数 | 必填 | 类型 | 说明 |
+|------|------|------|------|
+| `AppId` | 是 | String | 腾讯云 APPID |
+| `Secretid` | 是 | String | SDK 内部自动用 APPID 填充 |
+| `RequestId` | 是 | String | 全局请求唯一 ID（UUID），用于生成 UserSig |
+| `Timestamp` | 是 | Integer | 当前 UNIX 时间戳（秒） |
+
+#### 请求体参数（JSON）
+
+| 参数 | 必填 | 类型 | 说明 |
+|------|------|------|------|
+| `EngSerViceType` | 是 | String | 引擎类型：`16k_zh`(中文)、`16k_zh_en`(中英文) |
+| `SourceType` | 是 | Integer | `0` URL 上传、`1` 本地数据（base64） |
+| `VoiceFormat` | 是 | String | 音频格式：`wav`、`pcm`、`ogg-opus`、`mp3`、`m4a` |
+| `Data` | 条件 | String | base64 编码的音频数据（SourceType=1 时必填） |
+| `DataLen` | 条件 | Integer | 音频数据原始长度（SourceType=1 时必填） |
+| `Url` | 条件 | String | 音频 URL（SourceType=0 时必填） |
+| `WordInfo` | 否 | Integer | 词级时间：`0` 不显示、`1` 显示、`2` 含标点 |
+| `FilterDirty` | 否 | Integer | 脏词过滤：`0` 不过滤、`1` 过滤、`2` 替换 |
+| `FilterModal` | 否 | Integer | 语气词过滤：`0` 不过滤、`1` 部分、`2` 严格 |
+| `FilterPunc` | 否 | Integer | 标点过滤：`0` 不过滤、`2` 过滤全部 |
+| `ConvertNumMode` | 否 | Integer | 数字转换：`0` 不转、`1` 智能转换（默认） |
+| `HotwordId` | 否 | String | 热词表 ID |
+| `HotwordList` | 否 | String | 临时热词列表 |
+| `InputSampleRate` | 否 | Integer | PCM 输入采样率（仅 PCM 格式，支持 8000） |
+
+**限制**：音频时长 ≤ 60s，文件大小 ≤ 3MB，单账号并发 ≤ 30次/秒
+
 ---
 
 ## 安装
@@ -63,6 +98,8 @@ go get github.com/hydah/trtc-asr-sdk-go@latest
 **要求**：Go 1.21+
 
 ## 快速开始
+
+### 实时语音识别
 
 ```go
 package main
@@ -102,9 +139,9 @@ func (l *MyListener) OnFail(resp *asr.SpeechRecognitionResponse, err error) {
 func main() {
     // 1. 创建凭证
     credential := common.NewCredential(
-        1300403317,                                              // 腾讯云 APPID
-        1400188366,                                              // TRTC SDKAppID
-        "5bd2850fff3ecb11d7c805251c51ee463a25727bddc2385f3fa8b", // SDK密钥
+        0,                       // 腾讯云 APPID
+        0,                       // TRTC SDKAppID
+        "your-sdk-secret-key",   // SDK密钥
     )
 
     // 2. 创建识别器
@@ -135,6 +172,46 @@ func main() {
 
     // 6. 停止识别
     recognizer.Stop()
+}
+```
+
+### 一句话识别
+
+```go
+package main
+
+import (
+    "fmt"
+    "log"
+    "os"
+
+    "github.com/hydah/trtc-asr-sdk-go/asr"
+    "github.com/hydah/trtc-asr-sdk-go/common"
+)
+
+func main() {
+    // 1. 创建凭证
+    credential := common.NewCredential(
+        0,                       // 腾讯云 APPID
+        0,                       // TRTC SDKAppID
+        "your-sdk-secret-key",   // SDK密钥
+    )
+
+    // 2. 创建一句话识别器
+    recognizer := asr.NewSentenceRecognizer(credential)
+
+    // 3. 从本地文件识别（自动 base64 编码）
+    data, _ := os.ReadFile("audio.pcm")
+    result, err := recognizer.RecognizeData(data, "pcm", "16k_zh_en")
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    fmt.Printf("识别结果: %s\n", result.Result)
+    fmt.Printf("音频时长: %d ms\n", result.AudioDuration)
+
+    // 或者从 URL 识别
+    // result, err := recognizer.RecognizeURL("https://example.com/audio.wav", "wav", "16k_zh_en")
 }
 ```
 
@@ -173,13 +250,21 @@ func main() {
 
 ## 示例
 
-完整示例请参见 [`examples/realtime_asr/`](./examples/realtime_asr/)。
+完整示例请参见：
+
+- **实时语音识别**：[`examples/realtime_asr/`](./examples/realtime_asr/) — WebSocket 流式识别
+- **一句话识别**：[`examples/sentence_asr/`](./examples/sentence_asr/) — HTTP 短音频识别
 
 运行示例：
 
 ```bash
+# 实时语音识别
 cd examples/realtime_asr
-go run main.go -f ../../test.pcm
+go run main.go -f ../test.pcm
+
+# 一句话识别
+cd examples/sentence_asr
+go run main.go -f ../test.pcm -fmt pcm
 
 # 查看所有选项
 go run main.go -h
@@ -197,10 +282,15 @@ trtc-asr-sdk-go/
 │   ├── signature_test.go       # 参数构建单元测试
 │   └── errors.go               # 错误定义
 ├── asr/                        # ASR 语音识别模块
-│   ├── speech_recognizer.go    # 实时语音识别器
-│   └── speech_recognizer_test.go # 生命周期与并发健壮性测试
+│   ├── speech_recognizer.go    # 实时语音识别器（WebSocket）
+│   ├── speech_recognizer_test.go # 生命周期与并发健壮性测试
+│   ├── sentence_recognizer.go  # 一句话识别器（HTTP）
+│   └── sentence_recognizer_test.go # 一句话识别单元测试
 ├── examples/                   # 示例代码
-│   └── realtime_asr/           # 实时语音识别示例
+│   ├── test.pcm                # 测试音频文件（16kHz 16bit 单声道 PCM）
+│   ├── realtime_asr/           # 实时语音识别示例
+│   │   └── main.go
+│   └── sentence_asr/           # 一句话识别示例
 │       └── main.go
 ├── go.mod                      # Go module 配置
 ├── go.sum                      # 依赖校验
@@ -212,8 +302,8 @@ trtc-asr-sdk-go/
 
 ### APPID 和 SDKAppID 有什么区别？
 
-- **APPID**（如 `1300403317`）：腾讯云账号级别的 ID，从 [CAM 密钥管理](https://console.cloud.tencent.com/cam/capi) 获取，用于 WebSocket URL 路径
-- **SDKAppID**（如 `1400188366`）：TRTC 应用级别的 ID，从 [TRTC 控制台](https://console.cloud.tencent.com/trtc/app) 获取，用于 Header 鉴权
+- **APPID**（如 `13xxxxxxxx`）：腾讯云账号级别的 ID，从 [CAM 密钥管理](https://console.cloud.tencent.com/cam/capi) 获取，用于 WebSocket URL 路径
+- **SDKAppID**（如 `14xxxxxxxx`）：TRTC 应用级别的 ID，从 [TRTC 控制台](https://console.cloud.tencent.com/trtc/app) 获取，用于 Header 鉴权
 
 ### UserSig 是什么？
 
@@ -225,7 +315,8 @@ UserSig 是基于 SDKAppID 和 SDK 密钥计算的签名，用于 TRTC 服务鉴
 
 ### 支持哪些音频格式？
 
-当前支持 PCM 格式（`voice_format=1`），建议使用 16kHz、16bit、单声道的 PCM 音频。
+- **实时语音识别**：支持 PCM 格式（`voice_format=1`），建议 16kHz、16bit、单声道
+- **一句话识别**：支持 wav、pcm、ogg-opus、mp3、m4a，音频时长 ≤ 60s，文件 ≤ 3MB
 
 ## License
 

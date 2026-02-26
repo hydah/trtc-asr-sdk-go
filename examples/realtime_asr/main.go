@@ -77,7 +77,7 @@ func (l *MySpeechRecognitionListener) OnFail(resp *asr.SpeechRecognitionResponse
 func main() {
 	concurrency := flag.Int("c", 1, "number of concurrent recognition sessions")
 	loop := flag.Bool("l", false, "loop mode for stress testing")
-	filePath := flag.String("f", "test.pcm", "path to audio file (PCM format)")
+	filePath := flag.String("f", "../test.pcm", "path to audio file (PCM format)")
 	engine := flag.String("e", EngineModelType, "engine model type (16k_zh, 8k_zh, 16k_zh_en)")
 	flag.Parse()
 
