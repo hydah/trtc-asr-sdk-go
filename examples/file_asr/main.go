@@ -30,9 +30,9 @@ import (
 // ===== Configuration =====
 // Fill in your credentials before running.
 var (
-	AppID     = 0  // Tencent Cloud APPID (https://console.cloud.tencent.com/cam/capi)
-	SdkAppID  = 0  // TRTC application ID (e.g., 1400188366)
-	SecretKey = "" // TRTC SDK secret key
+	AppID     = 0                          // Tencent Cloud APPID (https://console.cloud.tencent.com/cam/capi)
+	SdkAppID  = 0                          // TRTC application ID (e.g., 1400188366)
+	SecretKey = ""                         // TRTC SDK secret key
 )
 
 func main() {
@@ -40,6 +40,7 @@ func main() {
 	audioURL := flag.String("u", "", "URL of audio file (≤1GB, ≤12h)")
 	engine := flag.String("e", "16k_zh_en", "engine model type (16k_zh, 16k_zh_en)")
 	resFormat := flag.Int("res", 1, "result format: 0=basic, 1=detailed, 2=detailed with punctuation timing")
+	callbackURL := flag.String("callback", "", "callback URL for receiving results when task completes")
 	pollInterval := flag.Duration("poll", time.Second, "poll interval for checking task status")
 	maxWait := flag.Duration("timeout", 10*time.Minute, "max wait time for task completion")
 	flag.Parse()
@@ -76,6 +77,7 @@ func main() {
 			ResTextFormat:   *resFormat,
 			SourceType:      asr.SourceTypeURL,
 			Url:             *audioURL,
+			CallbackUrl:     *callbackURL,
 		}
 		taskID, err = recognizer.CreateTask(req)
 	} else {
@@ -89,6 +91,7 @@ func main() {
 			EngineModelType: *engine,
 			ChannelNum:      1,
 			ResTextFormat:   *resFormat,
+			CallbackUrl:     *callbackURL,
 		}
 		taskID, err = recognizer.CreateTaskFromDataWithOptions(data, req)
 	}
