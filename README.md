@@ -1,6 +1,6 @@
 # TRTC-ASR Go SDK
 
-基于 TRTC 鉴权体系的语音识别（ASR）Go SDK，支持实时语音识别（WebSocket）和一句话识别（HTTP）两种模式。
+基于 TRTC 鉴权体系的语音识别（ASR）Go SDK，支持实时语音识别（WebSocket）、一句话识别（HTTP）和录音文件识别（异步 HTTP）三种模式。
 
 > 其他语言 SDK：[Python](https://github.com/hydah/trtc-asr-sdk-python) | [Node.js](https://github.com/hydah/trtc-asr-sdk-nodejs)
 
@@ -86,6 +86,65 @@
 | `InputSampleRate` | 否 | Integer | PCM 输入采样率（仅 PCM 格式，支持 8000） |
 
 **限制**：音频时长 ≤ 60s，文件大小 ≤ 3MB，单账号并发 ≤ 30次/秒
+
+### 录音文件识别接口
+
+录音文件识别是异步接口，适用于较长音频（≤12h）。工作流程为：提交任务 → 轮询结果。
+
+#### 创建任务：CreateRecTask
+
+- **请求地址**：`https://asr.cloud-rtc.com/v1/CreateRecTask?{请求参数}`
+- **请求方法**：HTTP POST，Content-Type 为 `application/json; charset=utf-8`
+- **并发限制**：默认 20次/秒
+
+URL 请求参数与一句话识别相同（AppId、Secretid、RequestId、Timestamp）。
+
+##### 请求体参数（JSON）
+
+| 参数 | 必填 | 类型 | 说明 |
+|------|------|------|------|
+| `EngineModelType` | 是 | String | 引擎类型：`16k_zh`(中文)、`16k_zh_en`(中英文) |
+| `ChannelNum` | 是 | Integer | 声道数，目前仅支持 `1` |
+| `ResTextFormat` | 是 | Integer | 结果格式：`0` 基础、`1` 含词级时间、`2` 含标点时间 |
+| `SourceType` | 是 | Integer | `0` URL 上传、`1` 本地数据（base64） |
+| `Url` | 条件 | String | 音频 URL（SourceType=0，时长≤12h，大小≤1GB） |
+| `Data` | 条件 | String | base64 编码音频数据（SourceType=1，大小≤5MB） |
+| `DataLen` | 条件 | Integer | 音频数据原始长度（SourceType=1） |
+| `CallbackUrl` | 否 | String | 回调 URL，任务完成后 POST 结果 |
+| `FilterDirty` | 否 | Integer | 脏词过滤 |
+| `FilterModal` | 否 | Integer | 语气词过滤 |
+| `FilterPunc` | 否 | Integer | 标点过滤 |
+| `ConvertNumMode` | 否 | Integer | 数字转换 |
+| `HotwordId` | 否 | String | 热词表 ID |
+| `HotwordList` | 否 | String | 临时热词列表 |
+
+##### 响应
+
+返回 `RecTaskId`（任务 ID），用于后续查询。任务有效期 24 小时。
+
+#### 查询结果：DescribeTaskStatus
+
+- **请求地址**：`https://asr.cloud-rtc.com/v1/DescribeTaskStatus?{请求参数}`
+- **请求方法**：HTTP POST
+- **并发限制**：默认 50次/秒
+
+##### 请求体参数（JSON）
+
+| 参数 | 必填 | 类型 | 说明 |
+|------|------|------|------|
+| `RecTaskId` | 是 | String | CreateRecTask 返回的任务 ID |
+
+##### 响应（TaskStatus）
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `RecTaskId` | String | 任务 ID |
+| `Status` | Integer | `0` 等待、`1` 执行中、`2` 成功、`3` 失败 |
+| `StatusStr` | String | waiting / doing / success / failed |
+| `Result` | String | 识别结果文本 |
+| `ErrorMsg` | String | 失败原因 |
+| `ResultDetail` | Array | 句级详细结果（含词级时间偏移） |
+| `AudioDuration` | Float | 音频时长（秒） |
 
 ---
 
@@ -215,6 +274,58 @@ func main() {
 }
 ```
 
+### 录音文件识别
+
+```go
+package main
+
+import (
+    "fmt"
+    "log"
+    "os"
+    "time"
+
+    "github.com/hydah/trtc-asr-sdk-go/asr"
+    "github.com/hydah/trtc-asr-sdk-go/common"
+)
+
+func main() {
+    // 1. 创建凭证
+    credential := common.NewCredential(
+        0,                       // 腾讯云 APPID
+        0,                       // TRTC SDKAppID
+        "your-sdk-secret-key",   // SDK密钥
+    )
+
+    // 2. 创建录音文件识别器
+    recognizer := asr.NewFileRecognizer(credential)
+
+    // 3. 提交识别任务（本地文件）
+    data, _ := os.ReadFile("audio.pcm")
+    taskID, err := recognizer.CreateTaskFromData(data, "pcm", "16k_zh_en")
+    if err != nil {
+        log.Fatal(err)
+    }
+    fmt.Printf("任务已提交: %s\n", taskID)
+
+    // 4. 轮询等待结果（默认 1 秒间隔，10 分钟超时）
+    status, err := recognizer.WaitForResult(taskID)
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    fmt.Printf("识别结果: %s\n", status.Result)
+    fmt.Printf("音频时长: %.2f s\n", status.AudioDuration)
+
+    // 或者从 URL 提交（支持更大文件，≤1GB / ≤12h）
+    // taskID, err := recognizer.CreateTaskFromURL("https://example.com/audio.wav", "16k_zh_en")
+
+    // 或者自定义轮询间隔
+    // status, err := recognizer.WaitForResultWithInterval(taskID, 2*time.Second, 30*time.Minute)
+    _ = time.Second // suppress unused import
+}
+```
+
 ## 凭证获取
 
 | 参数 | 来源 | 说明 |
@@ -253,7 +364,8 @@ func main() {
 完整示例请参见：
 
 - **实时语音识别**：[`examples/realtime_asr/`](./examples/realtime_asr/) — WebSocket 流式识别
-- **一句话识别**：[`examples/sentence_asr/`](./examples/sentence_asr/) — HTTP 短音频识别
+- **一句话识别**：[`examples/sentence_asr/`](./examples/sentence_asr/) — HTTP 短音频识别（≤60s）
+- **录音文件识别**：[`examples/file_asr/`](./examples/file_asr/) — 异步长音频识别
 
 运行示例：
 
@@ -265,6 +377,10 @@ go run main.go -f ../test.pcm
 # 一句话识别
 cd examples/sentence_asr
 go run main.go -f ../test.pcm -fmt pcm
+
+# 录音文件识别
+cd examples/file_asr
+go run main.go -f ../test.pcm
 
 # 查看所有选项
 go run main.go -h
@@ -285,12 +401,16 @@ trtc-asr-sdk-go/
 │   ├── speech_recognizer.go    # 实时语音识别器（WebSocket）
 │   ├── speech_recognizer_test.go # 生命周期与并发健壮性测试
 │   ├── sentence_recognizer.go  # 一句话识别器（HTTP）
-│   └── sentence_recognizer_test.go # 一句话识别单元测试
+│   ├── sentence_recognizer_test.go # 一句话识别单元测试
+│   ├── file_recognizer.go      # 录音文件识别器（异步 HTTP）
+│   └── file_recognizer_test.go # 录音文件识别单元测试
 ├── examples/                   # 示例代码
 │   ├── test.pcm                # 测试音频文件（16kHz 16bit 单声道 PCM）
 │   ├── realtime_asr/           # 实时语音识别示例
 │   │   └── main.go
-│   └── sentence_asr/           # 一句话识别示例
+│   ├── sentence_asr/           # 一句话识别示例
+│   │   └── main.go
+│   └── file_asr/               # 录音文件识别示例
 │       └── main.go
 ├── go.mod                      # Go module 配置
 ├── go.sum                      # 依赖校验
@@ -317,6 +437,7 @@ UserSig 是基于 SDKAppID 和 SDK 密钥计算的签名，用于 TRTC 服务鉴
 
 - **实时语音识别**：支持 PCM 格式（`voice_format=1`），建议 16kHz、16bit、单声道
 - **一句话识别**：支持 wav、pcm、ogg-opus、mp3、m4a，音频时长 ≤ 60s，文件 ≤ 3MB
+- **录音文件识别**：支持 wav、ogg-opus、mp3、m4a，本地文件 ≤ 5MB，URL ≤ 1GB / ≤ 12h
 
 ## License
 
