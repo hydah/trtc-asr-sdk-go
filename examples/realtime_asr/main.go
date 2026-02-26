@@ -3,7 +3,7 @@
 // Usage:
 //
 //	go run main.go -f test.pcm
-//	go run main.go -f test.pcm -e 16k_zh -c 1
+//	go run main.go -f test.pcm -e 16k_zh_en -c 1
 //
 // Prerequisites:
 //  1. Get Tencent Cloud APPID: https://console.cloud.tencent.com/cam/capi
@@ -21,8 +21,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/trtc-asr/trtc-asr-sdk-go/asr"
-	"github.com/trtc-asr/trtc-asr-sdk-go/common"
+	"github.com/hydah/trtc-asr-sdk-go/asr"
+	"github.com/hydah/trtc-asr-sdk-go/common"
 )
 
 // ===== Configuration =====
@@ -35,7 +35,7 @@ var (
 
 // ===== Default Settings =====
 var (
-	EngineModelType = "16k_zh"
+	EngineModelType = "16k_zh_en"
 	SliceSize       = 6400 // bytes per audio chunk (200ms for 16kHz 16bit mono PCM)
 )
 

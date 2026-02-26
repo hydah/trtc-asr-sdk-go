@@ -1,4 +1,4 @@
-module github.com/trtc-asr/trtc-asr-sdk-go
+module github.com/hydah/trtc-asr-sdk-go
 
 go 1.21
 

@@ -20,7 +20,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
-	"github.com/trtc-asr/trtc-asr-sdk-go/common"
+	"github.com/hydah/trtc-asr-sdk-go/common"
 )
 
 // Endpoint is the production WebSocket endpoint for the TRTC-ASR service.
@@ -261,11 +261,20 @@ func (r *SpeechRecognizer) Stop() error {
 	}
 
 	r.mu.Lock()
+	conn := r.conn
+	r.mu.Unlock()
+
+	if conn == nil {
+		atomic.StoreInt32(&r.state, stateStopped)
+		return common.NewASRError(common.ErrCodeNotStarted, "connection not established")
+	}
+
 	// Send end signal: empty text message
 	endMsg := map[string]string{"type": "end"}
 	data, _ := json.Marshal(endMsg)
-	r.conn.SetWriteDeadline(time.Now().Add(r.writeTimeout))
-	err := r.conn.WriteMessage(websocket.TextMessage, data)
+	r.mu.Lock()
+	conn.SetWriteDeadline(time.Now().Add(r.writeTimeout))
+	err := conn.WriteMessage(websocket.TextMessage, data)
 	r.mu.Unlock()
 
 	if err != nil {

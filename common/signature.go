@@ -11,7 +11,7 @@ import (
 
 // SignatureParams holds URL query parameters for the ASR WebSocket request.
 // The "secretid" URL parameter is required by the protocol but internally
-// populated with SdkAppID — users do not need to provide a separate SecretID.
+// populated with AppID — users do not need to provide a separate SecretID.
 // The "signature" parameter is set to the UserSig value per protocol spec.
 type SignatureParams struct {
 	AppID           int

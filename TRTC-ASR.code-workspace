@@ -1,0 +1,14 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"path": "../trtc-asr-sdk-python"
+		},
+		{
+			"path": "../trtc-asr-sdk-nodejs"
+		}
+	],
+	"settings": {}
+}

@@ -57,7 +57,7 @@
 ## 安装
 
 ```bash
-go get github.com/trtc-asr/trtc-asr-sdk-go@latest
+go get github.com/hydah/trtc-asr-sdk-go@latest
 ```
 
 **要求**：Go 1.21+
@@ -73,8 +73,8 @@ import (
     "os"
     "time"
 
-    "github.com/trtc-asr/trtc-asr-sdk-go/asr"
-    "github.com/trtc-asr/trtc-asr-sdk-go/common"
+    "github.com/hydah/trtc-asr-sdk-go/asr"
+    "github.com/hydah/trtc-asr-sdk-go/common"
 )
 
 // 实现回调接口
@@ -173,20 +173,12 @@ func main() {
 
 ## 示例
 
-完整示例请参见 [`examples/`](./examples/) 目录：
-
-- [`realtime_asr/`](./examples/realtime_asr/) — 硬编码凭证的基础示例
-- [`realtime_asr_env/`](./examples/realtime_asr_env/) — 使用环境变量的推荐示例
+完整示例请参见 [`examples/realtime_asr/`](./examples/realtime_asr/)。
 
 运行示例：
 
 ```bash
-# 使用环境变量（推荐）
-export TRTC_APP_ID="1300403317"
-export TRTC_SDK_APP_ID="1400188366"
-export TRTC_SECRET_KEY="your-sdk-secret-key"
-
-cd examples/realtime_asr_env
+cd examples/realtime_asr
 go run main.go -f ../../test.pcm
 
 # 查看所有选项
@@ -205,12 +197,10 @@ trtc-asr-sdk-go/
 │   ├── signature_test.go       # 参数构建单元测试
 │   └── errors.go               # 错误定义
 ├── asr/                        # ASR 语音识别模块
-│   └── speech_recognizer.go    # 实时语音识别器
+│   ├── speech_recognizer.go    # 实时语音识别器
+│   └── speech_recognizer_test.go # 生命周期与并发健壮性测试
 ├── examples/                   # 示例代码
-│   ├── .env.example            # 环境变量模板
-│   ├── realtime_asr/           # 基础示例
-│   │   └── main.go
-│   └── realtime_asr_env/       # 环境变量示例（推荐）
+│   └── realtime_asr/           # 实时语音识别示例
 │       └── main.go
 ├── go.mod                      # Go module 配置
 ├── go.sum                      # 依赖校验
