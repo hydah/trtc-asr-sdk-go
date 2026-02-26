@@ -33,6 +33,7 @@ Thumbs.db
 *.pcm
 *.wav
 *.mp3
+!examples/test.pcm
 
 # Build output
 bin/
