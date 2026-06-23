@@ -562,6 +562,23 @@ func (r *SpeechRecognizer) readLoop() {
 			return
 		}
 
+		// Skip the connection acknowledgement frame. After connect, the server
+		// sends an ack that carries no "result" object
+		// (e.g. {"code":0,"message":"success","voice_id":"v1"}). Decoding such a
+		// frame into SpeechRecognitionResponse yields a zero-valued Result whose
+		// SliceType=0 would otherwise be misread by dispatchEvent as a
+		// slice_type=0 "sentence begin", emitting a spurious OnSentenceBegin.
+		// The value-typed Result cannot tell "absent" from "zero", so probe the
+		// raw payload for the result field and skip frames that lack it. The
+		// session start is already signaled via OnRecognitionStart at readLoop
+		// entry.
+		var probe struct {
+			Result *json.RawMessage `json:"result"`
+		}
+		if json.Unmarshal(message, &probe) != nil || probe.Result == nil {
+			continue
+		}
+
 		r.dispatchEvent(&resp)
 	}
 }

@@ -318,6 +318,57 @@ func TestReadLoopTriggersRecognitionStartBeforeServerEvents(t *testing.T) {
 	}
 }
 
+// TestReadLoopHandshakeAckDoesNotTriggerSentenceBegin reproduces the real
+// server handshake behavior: the first frame after connect is a connection
+// acknowledgement that carries no "result" object and no "message_id"
+// (e.g. {"code":0,"message":"success","voice_id":"v1"}). Decoding it yields a
+// zero-valued Result (SliceType=0), which must NOT be mistaken for a
+// slice_type=0 "sentence begin" frame. Only the subsequent real result frame
+// should drive OnSentenceBegin.
+func TestReadLoopHandshakeAckDoesNotTriggerSentenceBegin(t *testing.T) {
+	listener := newTestListener()
+	r := newRecognizerForTest(listener)
+	client, server, cleanup := newWSPair(t)
+	defer cleanup()
+
+	r.conn = client
+	atomic.StoreInt32(&r.state, stateRunning)
+	go r.readLoop()
+
+	// 1. Connection ack: code 0, no result, no message_id.
+	ack := `{"code":0,"message":"success","voice_id":"v1"}`
+	if err := server.WriteMessage(websocket.TextMessage, []byte(ack)); err != nil {
+		t.Fatalf("server write ack failed: %v", err)
+	}
+
+	// 2. The one and only real sentence-begin frame.
+	begin := `{"code":0,"message":"success","voice_id":"v1","message_id":"m1","result":{"slice_type":0,"index":0,"voice_text_str":"今天。"}}`
+	if err := server.WriteMessage(websocket.TextMessage, []byte(begin)); err != nil {
+		t.Fatalf("server write begin failed: %v", err)
+	}
+
+	// 3. Final frame ends the session.
+	final := `{"code":0,"message":"success","voice_id":"v1","message_id":"m2","final":1}`
+	if err := server.WriteMessage(websocket.TextMessage, []byte(final)); err != nil {
+		t.Fatalf("server write final failed: %v", err)
+	}
+
+	select {
+	case <-listener.completeCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for OnRecognitionComplete")
+	}
+
+	listener.mu.Lock()
+	defer listener.mu.Unlock()
+	if listener.startN != 1 {
+		t.Fatalf("startN = %d, want 1", listener.startN)
+	}
+	if listener.sentenceN != 1 {
+		t.Fatalf("sentenceN = %d, want 1 (handshake ack must not trigger sentence begin)", listener.sentenceN)
+	}
+}
+
 func TestReadLoopFinalWithSliceZeroDoesNotTriggerSentenceBegin(t *testing.T) {
 	listener := newTestListener()
 	r := newRecognizerForTest(listener)
