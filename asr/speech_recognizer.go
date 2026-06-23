@@ -14,6 +14,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"runtime"
+	"runtime/debug"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -33,6 +36,23 @@ const (
 	stateRunning  int32 = 2
 	stateStopping int32 = 3
 	stateStopped  int32 = 4
+)
+
+// Write-timeout bounds. A single Write holds the writer for at most
+// writeTimeout (enforced via SetWriteDeadline), so Stop's worst-case wait to
+// acquire the writer for the end signal is bounded by writeTimeout. Clamping
+// keeps Stop's exit time predictable.
+const (
+	defaultWriteTimeout = 5 * time.Second
+	minWriteTimeout     = 50 * time.Millisecond
+	maxWriteTimeout     = 30 * time.Second
+
+	// Stop-timeout bounds. stopTimeout caps how long Stop waits for the
+	// server's final response after the end signal before forcing the
+	// connection closed.
+	defaultStopTimeout = 10 * time.Second
+	minStopTimeout     = 1 * time.Second
+	maxStopTimeout     = 60 * time.Second
 )
 
 // SpeechRecognitionListener defines the callback interface for speech recognition events.
@@ -63,24 +83,34 @@ type SpeechRecognitionResponse struct {
 
 // Result contains the speech recognition result details.
 type Result struct {
-	SliceType   int        `json:"slice_type"`
-	Index       int        `json:"index"`
-	StartTime   int        `json:"start_time"`
-	EndTime     int        `json:"end_time"`
-	VoiceTextStr string   `json:"voice_text_str"`
-	WordSize    int        `json:"word_size"`
-	WordList    []WordInfo `json:"word_list"`
+	SliceType    int        `json:"slice_type"`
+	Index        int        `json:"index"`
+	StartTime    int        `json:"start_time"`
+	EndTime      int        `json:"end_time"`
+	VoiceTextStr string     `json:"voice_text_str"`
+	WordSize     int        `json:"word_size"`
+	WordList     []WordInfo `json:"word_list"`
 }
 
 // WordInfo contains word-level recognition details.
 type WordInfo struct {
-	Word         string `json:"word"`
-	StartTime    int    `json:"start_time"`
-	EndTime      int    `json:"end_time"`
-	StableFlag   int    `json:"stable_flag"`
+	Word       string `json:"word"`
+	StartTime  int    `json:"start_time"`
+	EndTime    int    `json:"end_time"`
+	StableFlag int    `json:"stable_flag"`
 }
 
 // SpeechRecognizer is the main client for real-time speech recognition.
+//
+// Lifecycle and concurrency:
+//   - A SpeechRecognizer is single-use: once it reaches the stopped state (via
+//     Stop or a terminal error) it cannot be restarted. Create a new instance
+//     to reconnect.
+//   - All SetXxx options must be configured before Start and must not be called
+//     concurrently with Start.
+//   - After Start returns, Write and Stop may be called from a goroutine other
+//     than the one that called Start. Recognition callbacks are delivered on an
+//     internal goroutine.
 type SpeechRecognizer struct {
 	credential *common.Credential
 	listener   SpeechRecognitionListener
@@ -102,14 +132,26 @@ type SpeechRecognizer struct {
 	maxSpeakTime    int
 	voiceID         string
 
-	// State management
-	state    int32
-	mu       sync.Mutex
-	doneCh   chan struct{}
-	errCh    chan error
+	// State management.
+	//
+	// mu guards only the conn field; its critical sections are short and never
+	// contain network I/O, so close() can always acquire it and shut the
+	// connection down promptly — even while a Write is blocked on the network.
+	//
+	// writeMu serializes WebSocket writes (Write and Stop's end signal).
+	// gorilla/websocket permits at most one concurrent writer per connection.
+	state      int32
+	mu         sync.Mutex
+	writeMu    sync.Mutex
+	doneCh     chan struct{}
+	terminalCh chan struct{}
+	finishOnce sync.Once
+	doneOnce   sync.Once
+	termOnce   sync.Once
 
-	// Write timeout
+	// Timeouts
 	writeTimeout time.Duration
+	stopTimeout  time.Duration
 }
 
 // NewSpeechRecognizer creates a new SpeechRecognizer instance.
@@ -131,14 +173,15 @@ func NewSpeechRecognizer(
 		voiceFormat:     1, // PCM
 		needVad:         1,
 		convertNumMode:  1,
-		writeTimeout:    5 * time.Second,
+		writeTimeout:    defaultWriteTimeout,
+		stopTimeout:     defaultStopTimeout,
 		doneCh:          make(chan struct{}),
-		errCh:           make(chan error, 1),
+		terminalCh:      make(chan struct{}),
 	}
 }
 
 // SetVoiceFormat sets the audio encoding format.
-// 1: PCM (default), 0: disable VAD
+// 1: PCM (default). Other values depend on the formats supported by the engine.
 func (r *SpeechRecognizer) SetVoiceFormat(format int) {
 	r.voiceFormat = format
 }
@@ -206,9 +249,41 @@ func (r *SpeechRecognizer) SetVoiceID(id string) {
 	r.voiceID = id
 }
 
-// SetWriteTimeout sets the timeout for writing audio data.
+// SetWriteTimeout sets the timeout for a single audio write.
+//
+// The value is clamped to [minWriteTimeout, maxWriteTimeout]; a non-positive
+// value resets it to the default. Because Stop must acquire the writer to send
+// the end signal, an unbounded write timeout would let an in-flight Write delay
+// Stop indefinitely — clamping keeps Stop's worst-case exit time predictable
+// (roughly writeTimeout to acquire the writer, then up to stopTimeout for the
+// server's final response).
 func (r *SpeechRecognizer) SetWriteTimeout(timeout time.Duration) {
+	switch {
+	case timeout <= 0:
+		timeout = defaultWriteTimeout
+	case timeout < minWriteTimeout:
+		timeout = minWriteTimeout
+	case timeout > maxWriteTimeout:
+		timeout = maxWriteTimeout
+	}
 	r.writeTimeout = timeout
+}
+
+// SetStopTimeout sets how long Stop waits for the server's final response after
+// sending the end signal before forcing the connection closed.
+//
+// The value is clamped to [minStopTimeout, maxStopTimeout]; a non-positive
+// value resets it to the default (defaultStopTimeout).
+func (r *SpeechRecognizer) SetStopTimeout(timeout time.Duration) {
+	switch {
+	case timeout <= 0:
+		timeout = defaultStopTimeout
+	case timeout < minStopTimeout:
+		timeout = minStopTimeout
+	case timeout > maxStopTimeout:
+		timeout = maxStopTimeout
+	}
+	r.stopTimeout = timeout
 }
 
 // Start initiates the WebSocket connection and begins the recognition session.
@@ -238,15 +313,35 @@ func (r *SpeechRecognizer) Write(data []byte) error {
 		return common.NewASRError(common.ErrCodeNotStarted, "recognizer not running")
 	}
 
+	// Grab the connection under mu (short critical section), then release mu
+	// before the potentially blocking network write. This lets close() acquire
+	// mu and tear the connection down even while this write is in flight; the
+	// in-flight WriteMessage then returns an error instead of blocking Stop.
 	r.mu.Lock()
-	defer r.mu.Unlock()
+	conn := r.conn
+	r.mu.Unlock()
 
-	if r.conn == nil {
+	if conn == nil {
 		return common.NewASRError(common.ErrCodeNotStarted, "connection not established")
 	}
 
-	r.conn.SetWriteDeadline(time.Now().Add(r.writeTimeout))
-	if err := r.conn.WriteMessage(websocket.BinaryMessage, data); err != nil {
+	// gorilla/websocket allows only one concurrent writer per connection.
+	r.writeMu.Lock()
+	defer r.writeMu.Unlock()
+
+	// Re-check the state under writeMu. Between the entry check above and
+	// acquiring writeMu, Stop may have transitioned the state and sent the
+	// end signal. Writing audio after end would violate the protocol, so bail
+	// out instead. (Stop sets the state before taking writeMu to send end, so
+	// once we hold writeMu a non-running state means end was sent or is next.)
+	if atomic.LoadInt32(&r.state) != stateRunning {
+		return common.NewASRError(common.ErrCodeNotStarted, "recognizer not running")
+	}
+
+	// SetWriteDeadline only fails on a closed connection; WriteMessage below
+	// then surfaces that as a write error, so the deadline error is redundant.
+	_ = conn.SetWriteDeadline(time.Now().Add(r.writeTimeout))
+	if err := conn.WriteMessage(websocket.BinaryMessage, data); err != nil {
 		return common.NewASRErrorf(common.ErrCodeWriteFailed, "write audio data failed: %v", err)
 	}
 
@@ -254,7 +349,20 @@ func (r *SpeechRecognizer) Write(data []byte) error {
 }
 
 // Stop gracefully stops the recognition session.
-// It sends the end signal and waits for the server to complete.
+//
+// It sends the end signal and waits for the server's final response (up to
+// stopTimeout) before forcing the connection closed. Worst-case duration is
+// bounded by writeTimeout (to acquire the writer) plus stopTimeout.
+//
+// Stop is safe to call from a recognition callback.
+//
+// For terminal callbacks (OnRecognitionComplete / terminal OnFail), the
+// recognizer has already advanced to stopped before callback dispatch, so Stop
+// returns immediately with not-running.
+//
+// For non-terminal callbacks (for example OnRecognitionResultChange), Stop
+// sends the end signal and returns without waiting on doneCh; waiting there
+// would self-block because callbacks run on the readLoop goroutine.
 func (r *SpeechRecognizer) Stop() error {
 	if !atomic.CompareAndSwapInt32(&r.state, stateRunning, stateStopping) {
 		return common.NewASRError(common.ErrCodeNotStarted, "recognizer not running")
@@ -269,26 +377,43 @@ func (r *SpeechRecognizer) Stop() error {
 		return common.NewASRError(common.ErrCodeNotStarted, "connection not established")
 	}
 
-	// Send end signal: empty text message
+	// Send end signal: serialized with Write via writeMu (not mu), so the
+	// timeout-driven close() below can still acquire mu and force the
+	// connection closed even if this write blocks.
 	endMsg := map[string]string{"type": "end"}
 	data, _ := json.Marshal(endMsg)
-	r.mu.Lock()
-	conn.SetWriteDeadline(time.Now().Add(r.writeTimeout))
+	r.writeMu.Lock()
+	if atomic.LoadInt32(&r.state) == stateStopped {
+		r.writeMu.Unlock()
+		r.waitForReadLoopOrClose()
+		return nil
+	}
+	_ = conn.SetWriteDeadline(time.Now().Add(r.writeTimeout))
 	err := conn.WriteMessage(websocket.TextMessage, data)
-	r.mu.Unlock()
+	r.writeMu.Unlock()
 
 	if err != nil {
+		if atomic.LoadInt32(&r.state) == stateStopped {
+			r.waitForReadLoopOrClose()
+			return nil
+		}
 		r.close()
 		atomic.StoreInt32(&r.state, stateStopped)
 		return common.NewASRErrorf(common.ErrCodeWriteFailed, "send end signal failed: %v", err)
 	}
 
-	// Wait for readLoop to finish with timeout
-	select {
-	case <-r.doneCh:
-	case <-time.After(10 * time.Second):
-		r.close()
+	// If Stop is called from within a listener callback (which is invoked on the
+	// readLoop goroutine), waiting on doneCh here would self-block until timeout.
+	// In that case, return after sending end; readLoop will continue and finish.
+	// The watchdog preserves Stop's timeout semantics if the server never sends a
+	// terminal response after receiving end.
+	if calledFromListenerCallback() {
+		go r.waitForReadLoopOrClose()
+		return nil
 	}
+
+	// Wait for readLoop to finish with timeout
+	r.waitForReadLoopOrClose()
 
 	atomic.StoreInt32(&r.state, stateStopped)
 	return nil
@@ -301,13 +426,17 @@ func (r *SpeechRecognizer) connect() error {
 		r.voiceID = voiceID
 	}
 
-	// Generate UserSig if not already set
-	if r.credential.UserSig == "" {
-		userSig, err := common.GenUserSig(r.credential.SdkAppID, r.credential.SecretKey, voiceID, 86400)
+	// Resolve UserSig locally without mutating the shared credential. Writing
+	// back to r.credential.UserSig would race when a single *common.Credential
+	// is shared by multiple recognizers started concurrently. This mirrors how
+	// Sentence/FileRecognizer.doRequest resolve the signature.
+	userSig := r.credential.UserSig
+	if userSig == "" {
+		var err error
+		userSig, err = common.GenUserSig(r.credential.SdkAppID, r.credential.SecretKey, voiceID, 86400)
 		if err != nil {
 			return common.NewASRErrorf(common.ErrCodeAuthFailed, "generate user sig failed: %v", err)
 		}
-		r.credential.UserSig = userSig
 	}
 
 	// Build request parameters (AppID is used for URL secretid parameter)
@@ -325,14 +454,14 @@ func (r *SpeechRecognizer) connect() error {
 	sigParams.MaxSpeakTime = r.maxSpeakTime
 
 	// Per protocol: signature = UserSig
-	queryString := sigParams.BuildQueryStringWithSignature(r.credential.UserSig)
+	queryString := sigParams.BuildQueryStringWithSignature(userSig)
 	// URL path uses Tencent Cloud AppID (not SdkAppID)
 	wsURL := fmt.Sprintf("%s/asr/v2/%d?%s", r.endpoint, r.credential.AppID, queryString)
 
 	// Build WebSocket headers
 	header := http.Header{}
 	header.Set("X-TRTC-SdkAppId", fmt.Sprintf("%d", r.credential.SdkAppID))
-	header.Set("X-TRTC-UserSig", r.credential.UserSig)
+	header.Set("X-TRTC-UserSig", userSig)
 
 	// Create WebSocket dialer
 	dialer := websocket.Dialer{
@@ -350,56 +479,105 @@ func (r *SpeechRecognizer) connect() error {
 
 func (r *SpeechRecognizer) readLoop() {
 	defer func() {
-		close(r.doneCh)
-		r.close()
+		// readLoop runs on an SDK-owned goroutine. A panic here — whether from
+		// a user-supplied listener callback or from SDK internals — cannot be
+		// recovered by the caller (recover only works within the same
+		// goroutine), so without this guard it would crash the entire host
+		// process that embeds this SDK. Recover, shut down cleanly first, then
+		// surface it via OnFail (with the stack to aid diagnosis), so re-entrant
+		// Stop/Write calls from OnFail observe the stopped state.
+		if rec := recover(); rec != nil {
+			err := common.NewASRErrorf(common.ErrCodeReadFailed,
+				"recovered from panic in readLoop: %v\n%s", rec, debug.Stack())
+			r.finish()
+			r.safeOnFail(nil, err)
+			r.closeDone()
+			return
+		}
+		// finish() is idempotent (sync.Once); this is the catch-all for exit
+		// paths that did not finish explicitly (e.g. a caller-initiated close).
+		r.finish()
+		r.closeDone()
 	}()
 
+	// Capture the connection once. close() may set r.conn = nil concurrently
+	// (e.g. when Stop() times out), so reading r.conn on every iteration would
+	// race and can dereference a nil pointer. Holding a local reference keeps
+	// this loop safe: close() calls conn.Close(), which unblocks ReadMessage
+	// with an error and lets the loop exit cleanly.
+	r.mu.Lock()
+	conn := r.conn
+	r.mu.Unlock()
+
+	if conn == nil {
+		return
+	}
+
+	r.withListenerCallback(func() {
+		r.listener.OnRecognitionStart(&SpeechRecognitionResponse{
+			Code:    0,
+			Message: "success",
+			VoiceID: r.voiceID,
+		})
+	})
+
 	for {
-		_, message, err := r.conn.ReadMessage()
+		_, message, err := conn.ReadMessage()
 		if err != nil {
 			if atomic.LoadInt32(&r.state) >= stateStopping {
 				return
 			}
-			r.listener.OnFail(nil, common.NewASRErrorf(common.ErrCodeReadFailed, "read message failed: %v", err))
+			// Terminal: finish the lifecycle before notifying, so a Stop/Write
+			// call from inside OnFail sees the stopped state and returns
+			// immediately instead of waiting on doneCh (which only this
+			// goroutine closes).
+			r.finish()
+			r.safeOnFail(nil, common.NewASRErrorf(common.ErrCodeReadFailed, "read message failed: %v", err))
 			return
 		}
 
 		var resp SpeechRecognitionResponse
 		if err := json.Unmarshal(message, &resp); err != nil {
-			r.listener.OnFail(nil, common.NewASRErrorf(common.ErrCodeReadFailed, "unmarshal response failed: %v", err))
+			// Non-terminal: the session continues, so do not finish here.
+			r.safeOnFail(nil, common.NewASRErrorf(common.ErrCodeReadFailed, "unmarshal response failed: %v", err))
 			continue
 		}
 
 		if resp.Code != 0 {
-			r.listener.OnFail(&resp, common.NewASRError(resp.Code, resp.Message))
+			r.finish()
+			r.markTerminalResponseReceived()
+			r.safeOnFail(&resp, common.NewASRError(resp.Code, resp.Message))
+			return
+		}
+
+		// Check if recognition is complete before dispatching the terminal
+		// response. A Final=1 response can still carry slice_type=2, which
+		// dispatches OnSentenceEnd; finish first so Stop/Write from that callback
+		// observes the stopped state instead of waiting on doneCh.
+		if resp.Final == 1 {
+			r.finish()
+			r.markTerminalResponseReceived()
+			r.dispatchEvent(&resp)
+			r.safeComplete(&resp)
 			return
 		}
 
 		r.dispatchEvent(&resp)
-
-		// Check if recognition is complete
-		if resp.Final == 1 {
-			r.listener.OnRecognitionComplete(&resp)
-			return
-		}
 	}
 }
 
 func (r *SpeechRecognizer) dispatchEvent(resp *SpeechRecognitionResponse) {
+	if resp.Final == 1 && resp.Result.SliceType != 2 {
+		return
+	}
+
 	switch resp.Result.SliceType {
 	case 0:
-		r.listener.OnSentenceBegin(resp)
+		r.withListenerCallback(func() { r.listener.OnSentenceBegin(resp) })
 	case 1:
-		r.listener.OnRecognitionResultChange(resp)
+		r.withListenerCallback(func() { r.listener.OnRecognitionResultChange(resp) })
 	case 2:
-		r.listener.OnSentenceEnd(resp)
-	default:
-		// If Final=1 and no slice_type, it's a completion event
-		if resp.Final == 1 {
-			return // handled in readLoop
-		}
-		// First message is usually the start event
-		r.listener.OnRecognitionStart(resp)
+		r.withListenerCallback(func() { r.listener.OnSentenceEnd(resp) })
 	}
 }
 
@@ -412,4 +590,93 @@ func (r *SpeechRecognizer) close() {
 	}
 }
 
+// finish advances the recognizer to the terminal stopped state exactly once and
+// closes the connection. It is invoked before terminal callbacks (so a
+// Stop/Write from inside a callback returns immediately) and again from
+// readLoop's defer as a catch-all. doneCh is closed separately after readLoop
+// has delivered any terminal callback, so external Stop callers do not return
+// while final callbacks are still running.
+func (r *SpeechRecognizer) finish() {
+	r.finishOnce.Do(func() {
+		atomic.StoreInt32(&r.state, stateStopped)
+		r.close()
+	})
+}
 
+func (r *SpeechRecognizer) closeDone() {
+	r.doneOnce.Do(func() {
+		close(r.doneCh)
+	})
+}
+
+func (r *SpeechRecognizer) markTerminalResponseReceived() {
+	r.termOnce.Do(func() {
+		close(r.terminalCh)
+	})
+}
+
+func (r *SpeechRecognizer) waitForReadLoopOrClose() {
+	timer := time.NewTimer(r.stopTimeout)
+	defer timer.Stop()
+
+	select {
+	case <-r.doneCh:
+	case <-r.terminalCh:
+		<-r.doneCh
+	case <-timer.C:
+		r.close()
+	}
+}
+
+// safeOnFail delivers an OnFail callback while shielding the SDK's internal
+// goroutine from a panic inside the user-supplied listener. A faulty callback
+// must never crash the host process, and it must not prevent readLoop's
+// deferred cleanup from running.
+func (r *SpeechRecognizer) safeOnFail(resp *SpeechRecognitionResponse, err error) {
+	defer func() { _ = recover() }()
+	r.withListenerCallback(func() { r.listener.OnFail(resp, err) })
+}
+
+// safeComplete delivers the OnRecognitionComplete callback with the same
+// panic-shielding guarantee as safeOnFail.
+func (r *SpeechRecognizer) safeComplete(resp *SpeechRecognitionResponse) {
+	defer func() { _ = recover() }()
+	r.withListenerCallback(func() { r.listener.OnRecognitionComplete(resp) })
+}
+
+//go:noinline
+func (r *SpeechRecognizer) withListenerCallback(fn func()) {
+	fn()
+}
+
+// calledFromListenerCallback reports whether the current call stack passes
+// through withListenerCallback, i.e. Stop is being re-entered from within a
+// listener callback on the readLoop goroutine. It walks the stack (rather than
+// using a flag) so that an external goroutine calling Stop while readLoop is
+// inside a callback is NOT mistaken for re-entry — that caller must still wait
+// for the terminal response.
+//
+// Known limitation: detection is capped at 256 stack frames. If a callback
+// reaches Stop through a deeper call chain, this returns false and the
+// re-entrant Stop degrades to external-Stop semantics (it may self-wait up to
+// stopTimeout). Such depths are not expected in practice.
+func calledFromListenerCallback() bool {
+	for depth := 32; depth <= 256; depth *= 2 {
+		pcs := make([]uintptr, depth)
+		n := runtime.Callers(2, pcs)
+		frames := runtime.CallersFrames(pcs[:n])
+		for {
+			frame, more := frames.Next()
+			if strings.HasSuffix(frame.Function, ".(*SpeechRecognizer).withListenerCallback") {
+				return true
+			}
+			if !more {
+				break
+			}
+		}
+		if n < depth {
+			return false
+		}
+	}
+	return false
+}

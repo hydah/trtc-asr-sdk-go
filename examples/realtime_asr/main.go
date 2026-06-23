@@ -18,6 +18,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"strconv"
 	"sync"
 	"time"
 
@@ -37,6 +38,12 @@ var (
 var (
 	EngineModelType = "16k_zh_en"
 	SliceSize       = 6400 // bytes per audio chunk (200ms for 16kHz 16bit mono PCM)
+)
+
+const (
+	envAppID     = "TRTC_ASR_APP_ID"
+	envSdkAppID  = "TRTC_ASR_SDK_APP_ID"
+	envSecretKey = "TRTC_ASR_SECRET_KEY"
 )
 
 // MySpeechRecognitionListener implements the SpeechRecognitionListener interface.
@@ -82,15 +89,16 @@ func main() {
 	flag.Parse()
 
 	EngineModelType = *engine
+	loadCredentialsFromEnv()
 
 	if AppID == 0 || SdkAppID == 0 || SecretKey == "" {
-		log.Fatal("Error: Please set AppID, SdkAppID and SecretKey in the code.\n\n" +
+		log.Fatal("Error: Please set AppID, SdkAppID and SecretKey in the code or via environment variables.\n\n" +
 			"Steps:\n" +
 			"  1. Get APPID from CAM Console: https://console.cloud.tencent.com/cam/capi\n" +
 			"  2. Open TRTC Console: https://console.cloud.tencent.com/trtc/app\n" +
 			"  3. Create or select an application\n" +
 			"  4. Copy SDKAppID and SDK secret key from the application overview\n" +
-			"  5. Fill in the credentials at the top of this file.\n")
+			"  5. Fill in the credentials at the top of this file or export TRTC_ASR_APP_ID, TRTC_ASR_SDK_APP_ID and TRTC_ASR_SECRET_KEY.\n")
 	}
 
 	if _, err := os.Stat(*filePath); os.IsNotExist(err) {
@@ -113,6 +121,30 @@ func main() {
 		}(i)
 	}
 	wg.Wait()
+}
+
+func loadCredentialsFromEnv() {
+	if AppID == 0 {
+		AppID = parseEnvInt(envAppID)
+	}
+	if SdkAppID == 0 {
+		SdkAppID = parseEnvInt(envSdkAppID)
+	}
+	if SecretKey == "" {
+		SecretKey = os.Getenv(envSecretKey)
+	}
+}
+
+func parseEnvInt(name string) int {
+	value := os.Getenv(name)
+	if value == "" {
+		return 0
+	}
+	number, err := strconv.Atoi(value)
+	if err != nil {
+		log.Fatalf("Error: %s must be an integer: %v", name, err)
+	}
+	return number
 }
 
 func processAudio(id int, filePath string) {
