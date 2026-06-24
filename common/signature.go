@@ -33,6 +33,7 @@ type SignatureParams struct {
 	WordInfo        int
 	VadSilenceTime  int
 	MaxSpeakTime    int
+	Language        string // bigmodel engine language hint (e.g. "ms", "zh", "auto")
 }
 
 // NewSignatureParams creates SignatureParams with sensible defaults.
@@ -104,6 +105,9 @@ func (p *SignatureParams) toMap() map[string]string {
 	}
 	if p.MaxSpeakTime != 0 {
 		m["max_speak_time"] = fmt.Sprintf("%d", p.MaxSpeakTime)
+	}
+	if p.Language != "" {
+		m["language"] = p.Language
 	}
 
 	return m

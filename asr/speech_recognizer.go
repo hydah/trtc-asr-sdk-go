@@ -131,6 +131,7 @@ type SpeechRecognizer struct {
 	vadSilenceTime  int
 	maxSpeakTime    int
 	voiceID         string
+	language        string // bigmodel engine language hint
 
 	// State management.
 	//
@@ -247,6 +248,12 @@ func (r *SpeechRecognizer) SetMaxSpeakTime(ms int) {
 // SetVoiceID sets a custom voice ID. If not set, a UUID will be generated.
 func (r *SpeechRecognizer) SetVoiceID(id string) {
 	r.voiceID = id
+}
+
+// SetLanguage sets the language hint for the bigmodel engine (e.g. "ms", "zh", "auto").
+// It is transparently forwarded to the server as the "language" query parameter.
+func (r *SpeechRecognizer) SetLanguage(lang string) {
+	r.language = lang
 }
 
 // SetWriteTimeout sets the timeout for a single audio write.
@@ -452,6 +459,7 @@ func (r *SpeechRecognizer) connect() error {
 	sigParams.WordInfo = r.wordInfo
 	sigParams.VadSilenceTime = r.vadSilenceTime
 	sigParams.MaxSpeakTime = r.maxSpeakTime
+	sigParams.Language = r.language
 
 	// Per protocol: signature = UserSig
 	queryString := sigParams.BuildQueryStringWithSignature(userSig)

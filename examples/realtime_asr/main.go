@@ -13,12 +13,15 @@
 package main
 
 import (
+	"bufio"
+	"encoding/binary"
 	"flag"
 	"fmt"
 	"io"
 	"log"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -84,12 +87,17 @@ func (l *MySpeechRecognitionListener) OnFail(resp *asr.SpeechRecognitionResponse
 func main() {
 	concurrency := flag.Int("c", 1, "number of concurrent recognition sessions")
 	loop := flag.Bool("l", false, "loop mode for stress testing")
-	filePath := flag.String("f", "../test.pcm", "path to audio file (PCM format)")
-	engine := flag.String("e", EngineModelType, "engine model type (16k_zh, 8k_zh, 16k_zh_en)")
+	filePath := flag.String("f", "../test.pcm", "path to audio file (PCM or WAV)")
+	engine := flag.String("e", EngineModelType, "engine model type (16k_zh, 8k_zh, 16k_zh_en, bigmodel)")
+	lang := flag.String("lang", "", "language hint for bigmodel engine (e.g. ms, zh, auto)")
+	envFile := flag.String("env", "", "path to .env file to load credentials from (e.g. ../.env.test)")
 	flag.Parse()
 
 	EngineModelType = *engine
 	loadCredentialsFromEnv()
+	if *envFile != "" {
+		loadEnvFile(*envFile)
+	}
 
 	if AppID == 0 || SdkAppID == 0 || SecretKey == "" {
 		log.Fatal("Error: Please set AppID, SdkAppID and SecretKey in the code or via environment variables.\n\n" +
@@ -102,7 +110,7 @@ func main() {
 	}
 
 	if _, err := os.Stat(*filePath); os.IsNotExist(err) {
-		log.Fatalf("Error: Audio file not found: %s\n\nPlease provide a valid PCM audio file (16kHz, 16bit, mono).", *filePath)
+		log.Fatalf("Error: Audio file not found: %s\n\nPlease provide a valid PCM/WAV audio file.", *filePath)
 	}
 
 	var wg sync.WaitGroup
@@ -112,11 +120,11 @@ func main() {
 			defer wg.Done()
 			if *loop {
 				for {
-					processAudio(id, *filePath)
+					processAudio(id, *filePath, *lang)
 					time.Sleep(time.Second)
 				}
 			} else {
-				processAudio(id, *filePath)
+				processAudio(id, *filePath, *lang)
 			}
 		}(i)
 	}
@@ -147,7 +155,7 @@ func parseEnvInt(name string) int {
 	return number
 }
 
-func processAudio(id int, filePath string) {
+func processAudio(id int, filePath string, lang string) {
 	file, err := os.Open(filePath)
 	if err != nil {
 		log.Printf("[%d] Failed to open file: %v", id, err)
@@ -155,18 +163,34 @@ func processAudio(id int, filePath string) {
 	}
 	defer file.Close()
 
+	// If the file is a WAV, skip the header and stream raw PCM.
+	sliceSize := SliceSize
+	dataReader := io.Reader(file)
+	if sampleRate, isWAV, _ := skipWAVHeader(file); isWAV {
+		log.Printf("[%d] WAV detected (sample_rate=%d), header skipped", id, sampleRate)
+		dataReader = file
+		// 200ms slice = sampleRate * 2 bytes(16bit) * 0.2s
+		sliceSize = sampleRate * 2 * 200 / 1000
+		if sliceSize <= 0 {
+			sliceSize = SliceSize
+		}
+	}
+
 	credential := common.NewCredential(AppID, SdkAppID, SecretKey)
 	listener := &MySpeechRecognitionListener{ID: id}
 	recognizer := asr.NewSpeechRecognizer(credential, EngineModelType, listener)
+	if lang != "" {
+		recognizer.SetLanguage(lang)
+	}
 
 	if err := recognizer.Start(); err != nil {
 		log.Printf("[%d] Failed to start recognizer: %v", id, err)
 		return
 	}
 
-	buf := make([]byte, SliceSize)
+	buf := make([]byte, sliceSize)
 	for {
-		n, err := file.Read(buf)
+		n, err := dataReader.Read(buf)
 		if err != nil {
 			if err == io.EOF {
 				break
@@ -188,4 +212,104 @@ func processAudio(id int, filePath string) {
 	}
 
 	fmt.Printf("[%d] Processing complete.\n", id)
+}
+
+// skipWAVHeader reads the RIFF/WAVE header and positions the file cursor at the
+// start of the PCM data chunk. Returns (sampleRate, true, nil) for a valid WAV.
+func skipWAVHeader(f *os.File) (int, bool, error) {
+	// RIFF header: "RIFF" + 4-byte size + "WAVE" = 12 bytes
+	header := make([]byte, 12)
+	if _, err := io.ReadFull(f, header); err != nil {
+		return 0, false, err
+	}
+	if string(header[0:4]) != "RIFF" || string(header[8:12]) != "WAVE" {
+		// Not a WAV — rewind so the caller can read raw PCM from the start.
+		_, _ = f.Seek(0, io.SeekStart)
+		return 0, false, nil
+	}
+
+	sampleRate := 16000
+	// Walk chunks until we find "data".
+	for {
+		chunkHeader := make([]byte, 8)
+		if _, err := io.ReadFull(f, chunkHeader); err != nil {
+			return 0, false, err
+		}
+		chunkID := string(chunkHeader[0:4])
+		chunkSize := binary.LittleEndian.Uint32(chunkHeader[4:8])
+
+		if chunkID == "fmt " {
+			// fmt chunk: audioFormat(2) + numChannels(2) + sampleRate(4) + ...
+			fmtData := make([]byte, chunkSize)
+			if _, err := io.ReadFull(f, fmtData); err != nil {
+				return 0, false, err
+			}
+			if len(fmtData) >= 8 {
+				sampleRate = int(binary.LittleEndian.Uint32(fmtData[4:8]))
+			}
+			continue
+		}
+
+		if chunkID == "data" {
+			// File cursor now points at PCM samples.
+			return sampleRate, true, nil
+		}
+		// Skip this chunk (chunkSize bytes, padded to even).
+		skip := int64(chunkSize)
+		if chunkSize%2 == 1 {
+			skip++
+		}
+		if _, err := f.Seek(skip, io.SeekCurrent); err != nil {
+			return 0, false, err
+		}
+	}
+}
+
+// loadEnvFile reads a simple KEY = VALUE / KEY = "VALUE" file and populates
+// AppID, SdkAppID, SecretKey when the corresponding env vars are not already set.
+func loadEnvFile(path string) {
+	f, err := os.Open(path)
+	if err != nil {
+		log.Fatalf("Error: cannot open env file %s: %v", path, err)
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		// "Key = Value" or "Key = \"Value\""
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		key := strings.TrimSpace(parts[0])
+		val := strings.TrimSpace(parts[1])
+		val = strings.Trim(val, "\"")
+
+		switch strings.ToLower(key) {
+		case "appid":
+			if AppID == 0 {
+				AppID = parseStrInt(val)
+			}
+		case "sdkappid":
+			if SdkAppID == 0 {
+				SdkAppID = parseStrInt(val)
+			}
+		case "secretkey":
+			if SecretKey == "" {
+				SecretKey = val
+			}
+		}
+	}
+}
+
+func parseStrInt(s string) int {
+	n, err := strconv.Atoi(strings.TrimSpace(s))
+	if err != nil {
+		log.Fatalf("Error: invalid integer %q: %v", s, err)
+	}
+	return n
 }
