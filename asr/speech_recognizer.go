@@ -90,6 +90,7 @@ type Result struct {
 	VoiceTextStr string     `json:"voice_text_str"`
 	WordSize     int        `json:"word_size"`
 	WordList     []WordInfo `json:"word_list"`
+	Language     string     `json:"language"` // detected language (bigmodel engine, e.g. "Malay")
 }
 
 // WordInfo contains word-level recognition details.

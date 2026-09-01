@@ -68,8 +68,8 @@ func (l *MySpeechRecognitionListener) OnRecognitionResultChange(resp *asr.Speech
 }
 
 func (l *MySpeechRecognitionListener) OnSentenceEnd(resp *asr.SpeechRecognitionResponse) {
-	log.Printf("[%d] Sentence end, index: %d, text: %s",
-		l.ID, resp.Result.Index, resp.Result.VoiceTextStr)
+	log.Printf("[%d] Sentence end, index: %d, lang: %s, text: %s",
+		l.ID, resp.Result.Index, resp.Result.Language, resp.Result.VoiceTextStr)
 }
 
 func (l *MySpeechRecognitionListener) OnRecognitionComplete(resp *asr.SpeechRecognitionResponse) {
