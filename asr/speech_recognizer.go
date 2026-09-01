@@ -13,7 +13,6 @@ package asr
 import (
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"runtime"
 	"runtime/debug"
 	"strings"
@@ -91,6 +90,52 @@ type Result struct {
 	WordSize     int        `json:"word_size"`
 	WordList     []WordInfo `json:"word_list"`
 	Language     string     `json:"language"` // detected language (bigmodel engine, e.g. "Malay")
+
+	// SpeakerSegments lists the speaker attribution of this result, split by
+	// speaker turn. It is the recommended entry point for speaker diarization:
+	// one result may contain several speakers, so a sentence-level speaker is
+	// ambiguous by design. Empty when diarization is disabled.
+	//
+	// A result is single-speaker when len(SpeakerSegments) == 1.
+	SpeakerSegments []SpeakerSegment `json:"speaker_segments,omitempty"`
+
+	// SpeakerID is the legacy sentence-level speaker attribution. It is a
+	// pointer because 0 is a reserved value and the field is absent on most
+	// engines. Prefer SpeakerSegments / WordInfo.SpeakerID.
+	SpeakerID *int `json:"speaker_id,omitempty"`
+
+	// FinishSilenceMs is the trailing silence (ms) that triggered the sentence
+	// break. Zero when the server does not report it.
+	FinishSilenceMs int `json:"finish_silence_ms,omitempty"`
+
+	// LastTokenRuntimeMs is the server-side decoding time (ms) of the last
+	// token. Zero when the server does not report it.
+	LastTokenRuntimeMs int `json:"last_token_runtime_ms,omitempty"`
+}
+
+// SpeakerSegment is a contiguous section of one result attributed to a single
+// speaker. Returned when speaker diarization is enabled.
+type SpeakerSegment struct {
+	// SpeakerID is the speaker number within the current session. Valid IDs
+	// start at 1, -1 means unknown, 0 is reserved.
+	SpeakerID int `json:"speaker_id"`
+
+	// SpeakerName is the enrolled role name, returned only with
+	// speaker_diarization=3. It equals the requested SpeakerRole.RoleName.
+	SpeakerName string `json:"speaker_name,omitempty"`
+
+	StartTime int    `json:"start_time"`
+	EndTime   int    `json:"end_time"`
+	Text      string `json:"text,omitempty"`
+
+	// WordStart / WordEnd are inclusive indexes into Result.WordList, i.e.
+	// WordList[WordStart : WordEnd+1]. Both are nil when word_info=0 (no
+	// word list to index into); 0 is a valid index, hence the pointers.
+	WordStart *int `json:"word_start,omitempty"`
+	WordEnd   *int `json:"word_end,omitempty"`
+
+	// StableFlag reports whether this segment is stable: 1=stable, 0=not.
+	StableFlag int `json:"stable_flag"`
 }
 
 // WordInfo contains word-level recognition details.
@@ -99,7 +144,31 @@ type WordInfo struct {
 	StartTime  int    `json:"start_time"`
 	EndTime    int    `json:"end_time"`
 	StableFlag int    `json:"stable_flag"`
+
+	// SpeakerID is the speaker of this word, filled when speaker diarization
+	// is enabled together with word_info != 0. Valid IDs start at 1, -1 means
+	// unknown, 0 means absent.
+	SpeakerID int `json:"speaker_id,omitempty"`
+
+	// SpeakerName is the enrolled role name, returned only with
+	// speaker_diarization=3.
+	SpeakerName string `json:"speaker_name,omitempty"`
 }
+
+// SpeakerRole is a temporary voiceprint enrollment entry for
+// speaker_diarization=3. RoleName is echoed back as SpeakerName on matched
+// words and speaker segments.
+type SpeakerRole = common.SpeakerRole
+
+// Speaker diarization modes accepted by SetSpeakerDiarization.
+const (
+	// SpeakerDiarizationOff disables speaker diarization (default).
+	SpeakerDiarizationOff = common.SpeakerDiarizationOff
+	// SpeakerDiarizationCluster enables anonymous speaker clustering.
+	SpeakerDiarizationCluster = common.SpeakerDiarizationCluster
+	// SpeakerDiarizationVoiceprint enables voiceprint role authentication.
+	SpeakerDiarizationVoiceprint = common.SpeakerDiarizationVoiceprint
+)
 
 // SpeechRecognizer is the main client for real-time speech recognition.
 //
@@ -118,21 +187,31 @@ type SpeechRecognizer struct {
 	conn       *websocket.Conn
 
 	// Configuration
-	endpoint        string
-	engineModelType string
-	voiceFormat     int
-	needVad         int
-	convertNumMode  int
-	hotwordID       string
-	customizationID string
-	filterDirty     int
-	filterModal     int
-	filterPunc      int
-	wordInfo        int
-	vadSilenceTime  int
-	maxSpeakTime    int
-	voiceID         string
-	language        string // bigmodel engine language hint
+	endpoint           string
+	engineModelType    string
+	voiceFormat        int
+	needVad            int
+	convertNumMode     int
+	hotwordID          string
+	hotwordList        string
+	customizationID    string
+	replaceTextID      string
+	filterDirty        int
+	filterModal        int
+	filterPunc         int
+	filterEmptyResult  *int
+	wordInfo           int
+	vadSilenceTime     int
+	vadLevel           *int
+	noiseThreshold     *float64
+	maxSpeakTime       int
+	inputSampleRate    int
+	speakerDiarization int
+	speakerNumber      int
+	speakerRoles       []SpeakerRole
+	voiceprintIDs      []string
+	voiceID            string
+	language           string // bigmodel engine language hint
 
 	// State management.
 	//
@@ -205,9 +284,24 @@ func (r *SpeechRecognizer) SetHotwordID(id string) {
 	r.hotwordID = id
 }
 
+// SetHotwordList sets a temporary inline hotword list, which does not require
+// creating a hotword table on the console.
+//
+// Format: "word1|weight1,word2|weight2". Each word is at most 30 bytes and the
+// weight must be 1-11 (11 = super hotword) or 100 (homophone replacement).
+func (r *SpeechRecognizer) SetHotwordList(list string) {
+	r.hotwordList = list
+}
+
 // SetCustomizationID sets the custom language model ID.
 func (r *SpeechRecognizer) SetCustomizationID(id string) {
 	r.customizationID = id
+}
+
+// SetReplaceTextID sets the replacement word table ID used for forced text
+// replacement on the recognized result.
+func (r *SpeechRecognizer) SetReplaceTextID(id string) {
+	r.replaceTextID = id
 }
 
 // SetFilterDirty sets the profanity filter mode.
@@ -228,22 +322,100 @@ func (r *SpeechRecognizer) SetFilterPunc(mode int) {
 	r.filterPunc = mode
 }
 
+// SetFilterEmptyResult sets whether empty recognition results are delivered.
+// 0: deliver empty results, 1: skip them (server default).
+//
+// Calling this method makes the choice explicit on the wire, so passing 0 is
+// honored instead of falling back to the server default.
+func (r *SpeechRecognizer) SetFilterEmptyResult(mode int) {
+	r.filterEmptyResult = &mode
+}
+
 // SetWordInfo sets whether to show word-level timing information.
-// 0: no (default), 1: yes
+// 0: no (default), 1: yes, 2: include punctuation timing.
+//
+// Word-level speaker attribution (WordInfo.SpeakerID) requires a non-zero
+// value together with SetSpeakerDiarization.
 func (r *SpeechRecognizer) SetWordInfo(mode int) {
 	r.wordInfo = mode
 }
 
 // SetVadSilenceTime sets the silence detection threshold in milliseconds.
-// Range: 240-1000, default: 1000
+// Range: 240-2000, default: server-side (currently 800)
 func (r *SpeechRecognizer) SetVadSilenceTime(ms int) {
 	r.vadSilenceTime = ms
+}
+
+// SetVadLevel selects the VAD profile: 0 = high recall, 1 = far-field noise
+// filtering (server default).
+//
+// Calling this method makes the choice explicit on the wire, so passing 0 is
+// honored instead of falling back to the server default.
+func (r *SpeechRecognizer) SetVadLevel(level int) {
+	r.vadLevel = &level
+}
+
+// SetNoiseThreshold fine-tunes VAD noise suppression. Valid range: [0, 4];
+// larger values suppress more noise at the cost of recall. When set, it
+// overrides the profile selected by SetVadLevel.
+//
+// The value is only sent when this method is called, because 0 is a valid,
+// meaningful threshold and cannot be distinguished from "unset" otherwise.
+func (r *SpeechRecognizer) SetNoiseThreshold(threshold float64) {
+	r.noiseThreshold = &threshold
 }
 
 // SetMaxSpeakTime sets the maximum speech time in milliseconds.
 // Range: 5000-90000, default: 60000
 func (r *SpeechRecognizer) SetMaxSpeakTime(ms int) {
 	r.maxSpeakTime = ms
+}
+
+// SetInputSampleRate declares the sample rate of the incoming PCM audio.
+// Only 8000 is supported, which lets an 8kHz stream be fed to a 16k engine
+// (the server upsamples it).
+func (r *SpeechRecognizer) SetInputSampleRate(rate int) {
+	r.inputSampleRate = rate
+}
+
+// SetSpeakerDiarization enables real-time speaker diarization.
+//
+//	SpeakerDiarizationOff        (0) disabled (default)
+//	SpeakerDiarizationCluster    (1) anonymous clustering; speakers are numbered
+//	                                 from 1 within the session, -1 = unknown
+//	SpeakerDiarizationVoiceprint (3) voiceprint role authentication; combine with
+//	                                 SetSpeakerRoles / SetVoiceprintIDs to get
+//	                                 role names back in SpeakerName
+//
+// Results are reported through Result.SpeakerSegments, and additionally
+// through WordInfo.SpeakerID when SetWordInfo is non-zero.
+func (r *SpeechRecognizer) SetSpeakerDiarization(mode int) {
+	r.speakerDiarization = mode
+}
+
+// SetSpeakerNumber hints the expected number of speakers. 0 means auto
+// detection (default). It applies to both diarization modes: the server feeds
+// it into the online clustering.
+func (r *SpeechRecognizer) SetSpeakerNumber(n int) {
+	r.speakerNumber = n
+}
+
+// SetSpeakerRoles registers temporary voiceprints for this session. Each role
+// carries a name and the URL of its enrollment audio; the name is echoed back
+// as SpeakerName on matched words and speaker segments.
+//
+// Only used when speaker diarization is set to SpeakerDiarizationVoiceprint.
+// The slice is copied, so later mutations by the caller do not affect the
+// session.
+func (r *SpeechRecognizer) SetSpeakerRoles(roles []SpeakerRole) {
+	r.speakerRoles = append([]SpeakerRole(nil), roles...)
+}
+
+// SetVoiceprintIDs registers previously enrolled voiceprints by ID for this
+// session. Only used when speaker diarization is set to
+// SpeakerDiarizationVoiceprint. The slice is copied.
+func (r *SpeechRecognizer) SetVoiceprintIDs(ids []string) {
+	r.voiceprintIDs = append([]string(nil), ids...)
 }
 
 // SetVoiceID sets a custom voice ID. If not set, a UUID will be generated.
@@ -295,10 +467,18 @@ func (r *SpeechRecognizer) SetStopTimeout(timeout time.Duration) {
 }
 
 // Start initiates the WebSocket connection and begins the recognition session.
-// It returns an error if the connection fails or the recognizer is already running.
+// It returns an error if the configuration is invalid, the connection fails, or
+// the recognizer is already running.
 func (r *SpeechRecognizer) Start() error {
 	if !atomic.CompareAndSwapInt32(&r.state, stateIdle, stateStarting) {
 		return common.NewASRError(common.ErrCodeAlreadyStarted, "recognizer already started")
+	}
+
+	// Validate before dialing so an invalid option fails locally instead of
+	// costing a connection and coming back as a server-side 4001.
+	if err := r.validateOptions(); err != nil {
+		atomic.StoreInt32(&r.state, stateIdle)
+		return err
 	}
 
 	if err := r.connect(); err != nil {
@@ -312,6 +492,23 @@ func (r *SpeechRecognizer) Start() error {
 	go r.readLoop()
 
 	return nil
+}
+
+// validateOptions checks the options that have a documented server-side range.
+func (r *SpeechRecognizer) validateOptions() error {
+	if err := validateSpeakerDiarization(r.speakerDiarization, r.speakerNumber, r.speakerRoles, r.voiceprintIDs); err != nil {
+		return err
+	}
+	if err := validateVadTuning(r.vadLevel, r.noiseThreshold); err != nil {
+		return err
+	}
+	if r.filterEmptyResult != nil {
+		if err := validateEnumOption("FilterEmptyResult", *r.filterEmptyResult, 0, 1); err != nil {
+			return err
+		}
+	}
+	// 8000 is the only supported override; 0 means "use the engine rate".
+	return validateEnumOption("InputSampleRate", r.inputSampleRate, 0, 8000)
 }
 
 // Write sends audio data to the ASR service for recognition.
@@ -447,37 +644,49 @@ func (r *SpeechRecognizer) connect() error {
 		}
 	}
 
-	// Build request parameters (AppID is used for URL secretid parameter)
+	// Build request parameters (AppID is used for URL secretid parameter).
+	// Authentication identity (sdkappid + usersig) travels in the query string
+	// instead of headers, so browser WebSocket clients work without header
+	// support; the gateway reads these query parameters when the corresponding
+	// headers are absent.
 	sigParams := common.NewSignatureParams(r.credential.AppID, r.engineModelType, voiceID)
+	sigParams.SdkAppID = r.credential.SdkAppID
 	sigParams.VoiceFormat = r.voiceFormat
 	sigParams.NeedVad = r.needVad
 	sigParams.ConvertNumMode = r.convertNumMode
 	sigParams.HotwordID = r.hotwordID
+	sigParams.HotwordList = r.hotwordList
 	sigParams.CustomizationID = r.customizationID
+	sigParams.ReplaceTextID = r.replaceTextID
 	sigParams.FilterDirty = r.filterDirty
 	sigParams.FilterModal = r.filterModal
 	sigParams.FilterPunc = r.filterPunc
+	sigParams.FilterEmptyResult = r.filterEmptyResult
 	sigParams.WordInfo = r.wordInfo
 	sigParams.VadSilenceTime = r.vadSilenceTime
+	sigParams.VadLevel = r.vadLevel
+	sigParams.NoiseThreshold = r.noiseThreshold
 	sigParams.MaxSpeakTime = r.maxSpeakTime
+	sigParams.InputSampleRate = r.inputSampleRate
+	sigParams.SpeakerDiarization = r.speakerDiarization
+	sigParams.SpeakerNumber = r.speakerNumber
+	sigParams.SpeakerRoles = r.speakerRoles
+	sigParams.VoiceprintIDs = r.voiceprintIDs
 	sigParams.Language = r.language
 
-	// Per protocol: signature = UserSig
+	// Per protocol: signature = UserSig. BuildQueryStringWithSignature also
+	// emits usersig so the gateway authenticates without headers.
 	queryString := sigParams.BuildQueryStringWithSignature(userSig)
 	// URL path uses Tencent Cloud AppID (not SdkAppID)
 	wsURL := fmt.Sprintf("%s/asr/v2/%d?%s", r.endpoint, r.credential.AppID, queryString)
 
-	// Build WebSocket headers
-	header := http.Header{}
-	header.Set("X-TRTC-SdkAppId", fmt.Sprintf("%d", r.credential.SdkAppID))
-	header.Set("X-TRTC-UserSig", userSig)
-
-	// Create WebSocket dialer
+	// No custom headers: the handshake relies on the query string only, which
+	// also keeps native browser WebSocket usable.
 	dialer := websocket.Dialer{
 		HandshakeTimeout: 10 * time.Second,
 	}
 
-	conn, _, err := dialer.Dial(wsURL, header)
+	conn, _, err := dialer.Dial(wsURL, nil)
 	if err != nil {
 		return common.NewASRErrorf(common.ErrCodeConnectFailed, "websocket dial failed: %v", err)
 	}

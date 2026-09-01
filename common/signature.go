@@ -1,18 +1,52 @@
 package common
 
 import (
+	"encoding/json"
 	"fmt"
 	"math/rand"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
+
+// Speaker diarization modes for the speaker_diarization parameter.
+const (
+	// SpeakerDiarizationOff disables speaker diarization (server default).
+	SpeakerDiarizationOff = 0
+	// SpeakerDiarizationCluster enables anonymous clustering: speakers are
+	// numbered from 1 within the current session, -1 means unknown.
+	SpeakerDiarizationCluster = 1
+	// SpeakerDiarizationVoiceprint enables voiceprint-based role
+	// authentication. Combine with SpeakerRoles (temporary enrollment audio)
+	// and/or VoiceprintIDs (pre-registered voiceprints) so that recognized
+	// speakers carry their role name in speaker_name.
+	SpeakerDiarizationVoiceprint = 3
+)
+
+// SpeakerRole is a temporary voiceprint enrollment entry used with
+// speaker_diarization=3. RoleName is echoed back by the server as
+// speaker_name on the matched words / speaker segments.
+//
+// The JSON field names intentionally match the server-side contract
+// (CamelCase) for both the streaming speaker_roles query parameter and the
+// CreateRecTask SpeakerRoles body field.
+type SpeakerRole struct {
+	// RoleName is the caller-defined speaker label (e.g. "teacher").
+	RoleName string `json:"RoleName"`
+	// AudioUrl points to the enrollment audio for this role.
+	AudioUrl string `json:"AudioUrl"`
+}
 
 // SignatureParams holds URL query parameters for the ASR WebSocket request.
 // The "secretid" URL parameter is required by the protocol but internally
 // populated with AppID — users do not need to provide a separate SecretID.
 // The "signature" parameter is set to the UserSig value per protocol spec.
+//
+// Authentication identity travels in the URL instead of HTTP headers: the
+// gateway accepts the "sdkappid" / "usersig" query parameters, and browsers
+// cannot attach custom headers to a native WebSocket handshake.
 type SignatureParams struct {
 	AppID           int
 	Timestamp       int64
@@ -23,9 +57,15 @@ type SignatureParams struct {
 	VoiceFormat     int
 	NeedVad         int
 
+	// SdkAppID is the TRTC application ID, sent as the "sdkappid" query
+	// parameter. 0 means not configured.
+	SdkAppID int
+
 	// Optional parameters
 	HotwordID       string
+	HotwordList     string // temporary inline hotwords: "word|weight,word|weight"
 	CustomizationID string
+	ReplaceTextID   string // replacement word table ID
 	FilterDirty     int
 	FilterModal     int
 	FilterPunc      int
@@ -33,7 +73,39 @@ type SignatureParams struct {
 	WordInfo        int
 	VadSilenceTime  int
 	MaxSpeakTime    int
+	InputSampleRate int    // 8000: feed 8kHz PCM to a 16k engine (upsampled server-side)
 	Language        string // bigmodel engine language hint (e.g. "ms", "zh", "auto")
+
+	// FilterEmptyResult controls empty-result callbacks: 0=deliver empty
+	// results, 1=skip them (server default). nil leaves the parameter out.
+	FilterEmptyResult *int
+
+	// VadLevel selects the VAD profile: 0=high recall, 1=far-field filtering
+	// (server default). nil leaves the parameter out, so an explicit 0 is
+	// distinguishable from "not configured".
+	VadLevel *int
+
+	// NoiseThreshold fine-tunes VAD noise suppression, range [0, 4]. When set
+	// it overrides the profile selected by VadLevel. nil leaves the parameter
+	// out (0 is a valid, meaningful value).
+	NoiseThreshold *float64
+
+	// SpeakerDiarization enables speaker diarization: 0=off (default),
+	// 1=anonymous clustering, 3=voiceprint role authentication.
+	SpeakerDiarization int
+
+	// SpeakerNumber hints the expected speaker count; 0=auto detection
+	// (default). Sent whenever diarization is enabled: the server feeds it
+	// into online clustering for both modes.
+	SpeakerNumber int
+
+	// SpeakerRoles carries temporary voiceprint enrollment audio, serialized
+	// into the speaker_roles JSON array. Only sent when SpeakerDiarization is 3.
+	SpeakerRoles []SpeakerRole
+
+	// VoiceprintIDs lists pre-registered voiceprint IDs, serialized into the
+	// voiceprintids JSON array. Only sent when SpeakerDiarization is 3.
+	VoiceprintIDs []string
 }
 
 // NewSignatureParams creates SignatureParams with sensible defaults.
@@ -59,15 +131,18 @@ func (p *SignatureParams) BuildQueryString() string {
 }
 
 // BuildQueryStringWithSignature constructs the URL query string with signature set to the given userSig.
-// Per protocol: "signature" value equals X-TRTC-UserSig.
+// Per protocol: "signature" value equals the UserSig. The same value is also
+// sent as the "usersig" query parameter, which the gateway reads when the
+// X-TRTC-UserSig header is absent (e.g. browser WebSocket clients).
 func (p *SignatureParams) BuildQueryStringWithSignature(userSig string) string {
 	params := p.toMap()
 	params["signature"] = userSig
+	params["usersig"] = userSig
 	return encodeParams(params)
 }
 
 func (p *SignatureParams) toMap() map[string]string {
-	// "secretid" is required by protocol; internally use SdkAppID as its value.
+	// "secretid" is required by protocol; internally use AppID as its value.
 	m := map[string]string{
 		"secretid":          fmt.Sprintf("%d", p.AppID),
 		"timestamp":         fmt.Sprintf("%d", p.Timestamp),
@@ -78,12 +153,21 @@ func (p *SignatureParams) toMap() map[string]string {
 		"voice_format":      fmt.Sprintf("%d", p.VoiceFormat),
 		"needvad":           fmt.Sprintf("%d", p.NeedVad),
 	}
+	if p.SdkAppID > 0 {
+		m["sdkappid"] = fmt.Sprintf("%d", p.SdkAppID)
+	}
 
 	if p.HotwordID != "" {
 		m["hotword_id"] = p.HotwordID
 	}
+	if p.HotwordList != "" {
+		m["hotword_list"] = p.HotwordList
+	}
 	if p.CustomizationID != "" {
 		m["customization_id"] = p.CustomizationID
+	}
+	if p.ReplaceTextID != "" {
+		m["replace_text_id"] = p.ReplaceTextID
 	}
 	if p.FilterDirty != 0 {
 		m["filter_dirty"] = fmt.Sprintf("%d", p.FilterDirty)
@@ -93,6 +177,9 @@ func (p *SignatureParams) toMap() map[string]string {
 	}
 	if p.FilterPunc != 0 {
 		m["filter_punc"] = fmt.Sprintf("%d", p.FilterPunc)
+	}
+	if p.FilterEmptyResult != nil {
+		m["filter_empty_result"] = fmt.Sprintf("%d", *p.FilterEmptyResult)
 	}
 	if p.ConvertNumMode != 0 {
 		m["convert_num_mode"] = fmt.Sprintf("%d", p.ConvertNumMode)
@@ -105,6 +192,38 @@ func (p *SignatureParams) toMap() map[string]string {
 	}
 	if p.MaxSpeakTime != 0 {
 		m["max_speak_time"] = fmt.Sprintf("%d", p.MaxSpeakTime)
+	}
+	if p.InputSampleRate != 0 {
+		m["input_sample_rate"] = fmt.Sprintf("%d", p.InputSampleRate)
+	}
+	// VadLevel and NoiseThreshold are tri-state: an explicit 0 differs from
+	// "not configured" (the server defaults vad_level to 1), so they are only
+	// emitted when the caller set them.
+	if p.VadLevel != nil {
+		m["vad_level"] = fmt.Sprintf("%d", *p.VadLevel)
+	}
+	if p.NoiseThreshold != nil {
+		m["noise_threshold"] = strconv.FormatFloat(*p.NoiseThreshold, 'f', 3, 64)
+	}
+	if p.SpeakerDiarization != 0 {
+		m["speaker_diarization"] = fmt.Sprintf("%d", p.SpeakerDiarization)
+		if p.SpeakerNumber != 0 {
+			m["speaker_number"] = fmt.Sprintf("%d", p.SpeakerNumber)
+		}
+	}
+	// speaker_roles / voiceprintids only apply to the voiceprint role
+	// authentication mode.
+	if p.SpeakerDiarization == SpeakerDiarizationVoiceprint {
+		if len(p.SpeakerRoles) > 0 {
+			if rolesJSON, err := json.Marshal(p.SpeakerRoles); err == nil {
+				m["speaker_roles"] = string(rolesJSON)
+			}
+		}
+		if len(p.VoiceprintIDs) > 0 {
+			if idsJSON, err := json.Marshal(p.VoiceprintIDs); err == nil {
+				m["voiceprintids"] = string(idsJSON)
+			}
+		}
 	}
 	if p.Language != "" {
 		m["language"] = p.Language

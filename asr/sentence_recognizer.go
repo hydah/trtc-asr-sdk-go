@@ -82,9 +82,16 @@ type SentenceRecognitionRequest struct {
 	// Format: "word1|weight1,word2|weight2" (word max 10 chars, weight 1-11 or 100)
 	HotwordList string `json:"HotwordList,omitempty"`
 
+	// CustomizationID is the custom language model ID.
+	CustomizationID string `json:"CustomizationId,omitempty"`
+
 	// InputSampleRate overrides the engine sample rate for 8k PCM audio.
 	// Only for PCM format. Supported: 8000. Used with 16k engine to upsample.
 	InputSampleRate int `json:"InputSampleRate,omitempty"`
+
+	// Language forces the audio language on engines that support it
+	// (e.g. bigmodel). Empty means automatic detection.
+	Language string `json:"Language,omitempty"`
 }
 
 // SentenceRecognitionResponse represents the JSON response from sentence recognition.

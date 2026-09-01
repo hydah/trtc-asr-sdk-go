@@ -1,6 +1,7 @@
 package common
 
 import (
+	"net/url"
 	"strings"
 	"testing"
 )
@@ -58,6 +59,7 @@ func TestBuildQueryString(t *testing.T) {
 
 func TestBuildQueryStringWithSignature(t *testing.T) {
 	params := NewSignatureParams(1300403317, "16k_zh", "voice-001")
+	params.SdkAppID = 1400000000
 	userSig := "eJwtzDEOgCAQRdG9UBMH-test-user-sig"
 	qs := params.BuildQueryStringWithSignature(userSig)
 
@@ -74,6 +76,22 @@ func TestBuildQueryStringWithSignature(t *testing.T) {
 		if !strings.Contains(qs, key) {
 			t.Errorf("BuildQueryStringWithSignature missing key: %s", key)
 		}
+	}
+
+	// Authentication identity travels in the query string, not headers, so
+	// browser WebSocket clients work: sdkappid + usersig alongside signature.
+	values, err := url.ParseQuery(qs)
+	if err != nil {
+		t.Fatalf("ParseQuery failed: %v", err)
+	}
+	if values.Get("signature") != userSig {
+		t.Errorf("signature = %q, want the userSig verbatim", values.Get("signature"))
+	}
+	if values.Get("usersig") != userSig {
+		t.Errorf("usersig = %q, want the userSig verbatim", values.Get("usersig"))
+	}
+	if values.Get("sdkappid") != "1400000000" {
+		t.Errorf("sdkappid = %q, want 1400000000", values.Get("sdkappid"))
 	}
 }
 

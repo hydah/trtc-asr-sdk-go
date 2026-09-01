@@ -96,6 +96,52 @@ type CreateRecTaskRequest struct {
 	// HotwordList is a temporary inline hotword list.
 	// Format: "word1|weight1,word2|weight2"
 	HotwordList string `json:"HotwordList,omitempty"`
+
+	// CustomizationId is the custom language model ID.
+	CustomizationId string `json:"CustomizationId,omitempty"`
+
+	// ReplaceTextId is the replacement word table ID used for forced text
+	// replacement on the recognized result.
+	ReplaceTextId string `json:"ReplaceTextId,omitempty"`
+
+	// Language forces the audio language on engines that support it
+	// (e.g. bigmodel). Empty means automatic detection.
+	Language string `json:"Language,omitempty"`
+
+	// SpeakerDiarization enables speaker diarization (说话人分离).
+	// 0: off (default), 1: anonymous clustering, 3: voiceprint role authentication.
+	//
+	// When enabled, each sentence in ResultDetail carries SpeakerId; with mode 3
+	// and SpeakerRoles / VoiceprintIds supplied, SpeakerRoleName is filled too.
+	//
+	// For stereo recordings (ChannelNum=2) do NOT enable this: the server
+	// auto-fills ChannelId (1=left, 2=right) per sentence instead.
+	SpeakerDiarization int `json:"SpeakerDiarization,omitempty"`
+
+	// SpeakerNumber hints the expected number of speakers.
+	// 0: auto detection (default). Only used when SpeakerDiarization > 0.
+	SpeakerNumber int `json:"SpeakerNumber,omitempty"`
+
+	// SpeakerRoles registers temporary voiceprints (enrollment audio URL +
+	// role name) for this task. Only used when SpeakerDiarization is 3.
+	SpeakerRoles []SpeakerRole `json:"SpeakerRoles,omitempty"`
+
+	// VoiceprintIds lists previously enrolled voiceprint IDs.
+	// Only used when SpeakerDiarization is 3.
+	VoiceprintIds []string `json:"VoiceprintIds,omitempty"`
+
+	// VadSilenceMs is the silence detection threshold in milliseconds.
+	VadSilenceMs int `json:"VadSilenceMs,omitempty"`
+
+	// VadLevel selects the VAD profile: 0 = high recall (default),
+	// 1 = far-field noise filtering. It is a pointer so that an explicit 0 can
+	// be distinguished from "not configured".
+	VadLevel *int `json:"VadLevel,omitempty"`
+
+	// NoiseThreshold fine-tunes VAD noise suppression, range [0, 4]. When set
+	// it overrides the profile selected by VadLevel. It is a pointer because 0
+	// is a valid, meaningful threshold.
+	NoiseThreshold *float64 `json:"NoiseThreshold,omitempty"`
 }
 
 // CreateRecTaskResponse represents the JSON response from CreateRecTask.
@@ -128,26 +174,44 @@ type DescribeTaskStatusResponse struct {
 
 // TaskStatus contains the full task status and result.
 type TaskStatus struct {
-	RecTaskId     string             `json:"RecTaskId"`
-	Status        int                `json:"Status"`
-	StatusStr     string             `json:"StatusStr"`
-	Result        string             `json:"Result"`
-	ErrorMsg      string             `json:"ErrorMsg"`
-	ResultDetail  []SentenceDetail   `json:"ResultDetail"`
-	AudioDuration float64            `json:"AudioDuration"`
+	RecTaskId     string           `json:"RecTaskId"`
+	Status        int              `json:"Status"`
+	StatusStr     string           `json:"StatusStr"`
+	Progress      int              `json:"Progress"`
+	Result        string           `json:"Result"`
+	ErrorMsg      string           `json:"ErrorMsg"`
+	ResultDetail  []SentenceDetail `json:"ResultDetail"`
+	AudioDuration float64          `json:"AudioDuration"`
 }
 
 // SentenceDetail contains sentence-level recognition result with word timing.
 type SentenceDetail struct {
-	FinalSentence string           `json:"FinalSentence"`
-	SliceSentence string           `json:"SliceSentence"`
-	WrittenText   string           `json:"WrittenText"`
-	StartMs       int              `json:"StartMs"`
-	EndMs         int              `json:"EndMs"`
-	WordsNum      int              `json:"WordsNum"`
-	Words         []SentenceWords  `json:"Words"`
-	SpeechSpeed   float64          `json:"SpeechSpeed"`
-	SilenceTime   int              `json:"SilenceTime"`
+	FinalSentence string          `json:"FinalSentence"`
+	SliceSentence string          `json:"SliceSentence"`
+	WrittenText   string          `json:"WrittenText"`
+	StartMs       int             `json:"StartMs"`
+	EndMs         int             `json:"EndMs"`
+	WordsNum      int             `json:"WordsNum"`
+	Words         []SentenceWords `json:"Words"`
+	SpeechSpeed   float64         `json:"SpeechSpeed"`
+	SilenceTime   int             `json:"SilenceTime"`
+
+	// SpeakerId is the speaker number of this sentence, returned when
+	// SpeakerDiarization is enabled.
+	SpeakerId int `json:"SpeakerId,omitempty"`
+
+	// SpeakerRoleName is the enrolled role name of this sentence, returned when
+	// SpeakerDiarization=3 matched one of the requested SpeakerRoles /
+	// VoiceprintIds. Empty when no enrolled speaker matched.
+	SpeakerRoleName string `json:"SpeakerRoleName,omitempty"`
+
+	// ChannelId is the audio channel of this sentence for stereo recordings
+	// (ChannelNum=2): 1=left, 2=right. Prefer it over SpeakerId in that case.
+	ChannelId int `json:"ChannelId,omitempty"`
+
+	// Language is the detected language of this sentence, when the engine
+	// reports one.
+	Language string `json:"Language,omitempty"`
 }
 
 // SentenceWords contains word-level timing information within a sentence.
@@ -416,5 +480,8 @@ func (r *FileRecognizer) validateCreateRequest(req *CreateRecTaskRequest) error 
 	if req.SourceType == SourceTypeData && req.Data == "" {
 		return common.NewASRError(common.ErrCodeInvalidParam, "Data is required when SourceType=1")
 	}
-	return nil
+	if err := validateSpeakerDiarization(req.SpeakerDiarization, req.SpeakerNumber, req.SpeakerRoles, req.VoiceprintIds); err != nil {
+		return err
+	}
+	return validateVadTuning(req.VadLevel, req.NoiseThreshold)
 }

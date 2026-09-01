@@ -70,6 +70,18 @@ func (l *MySpeechRecognitionListener) OnRecognitionResultChange(resp *asr.Speech
 func (l *MySpeechRecognitionListener) OnSentenceEnd(resp *asr.SpeechRecognitionResponse) {
 	log.Printf("[%d] Sentence end, index: %d, lang: %s, text: %s",
 		l.ID, resp.Result.Index, resp.Result.Language, resp.Result.VoiceTextStr)
+
+	// With speaker diarization enabled, attribution lives in speaker_segments:
+	// one sentence may contain several speakers, so a sentence-level speaker
+	// would be ambiguous.
+	for _, seg := range resp.Result.SpeakerSegments {
+		label := seg.SpeakerName // only returned with diarization mode 3
+		if label == "" {
+			label = fmt.Sprintf("spk%d", seg.SpeakerID)
+		}
+		log.Printf("[%d]   [%s] %s (%d-%d ms, stable=%d)",
+			l.ID, label, seg.Text, seg.StartTime, seg.EndTime, seg.StableFlag)
+	}
 }
 
 func (l *MySpeechRecognitionListener) OnRecognitionComplete(resp *asr.SpeechRecognitionResponse) {
@@ -90,6 +102,12 @@ func main() {
 	filePath := flag.String("f", "../test.pcm", "path to audio file (PCM or WAV)")
 	engine := flag.String("e", EngineModelType, "engine model type (16k_zh, 8k_zh, 16k_zh_en, bigmodel)")
 	lang := flag.String("lang", "", "language hint for bigmodel engine (e.g. ms, zh, auto)")
+	diarization := flag.Int("diarization", 0, "speaker diarization: 0=off, 1=cluster, 3=voiceprint roles")
+	speakerNumber := flag.Int("speakers", 0, "expected speaker count hint (0=auto), only for -diarization=3")
+	roleSpec := flag.String("roles", "", "voiceprint roles for -diarization=3: \"name=https://url,name2=https://url2\"")
+	wordInfo := flag.Int("word-info", 0, "word-level timestamps: 0=off, 1=on, 2=with punctuation")
+	vadLevel := flag.Int("vad-level", -1, "VAD profile: 0=high recall, 1=far-field; negative means unset")
+	noiseThreshold := flag.Float64("noise-threshold", -1, "VAD noise threshold [0,4]; negative means unset")
 	envFile := flag.String("env", "", "path to .env file to load credentials from (e.g. ../.env.test)")
 	flag.Parse()
 
@@ -97,6 +115,16 @@ func main() {
 	loadCredentialsFromEnv()
 	if *envFile != "" {
 		loadEnvFile(*envFile)
+	}
+
+	opts := recognizerOptions{
+		language:       *lang,
+		diarization:    *diarization,
+		speakerNumber:  *speakerNumber,
+		roles:          parseRoles(*roleSpec),
+		wordInfo:       *wordInfo,
+		vadLevel:       *vadLevel,
+		noiseThreshold: *noiseThreshold,
 	}
 
 	if AppID == 0 || SdkAppID == 0 || SecretKey == "" {
@@ -120,15 +148,75 @@ func main() {
 			defer wg.Done()
 			if *loop {
 				for {
-					processAudio(id, *filePath, *lang)
+					processAudio(id, *filePath, opts)
 					time.Sleep(time.Second)
 				}
 			} else {
-				processAudio(id, *filePath, *lang)
+				processAudio(id, *filePath, opts)
 			}
 		}(i)
 	}
 	wg.Wait()
+}
+
+// recognizerOptions groups the optional recognition settings so the worker
+// signature stays readable as more knobs are added.
+type recognizerOptions struct {
+	language      string
+	diarization   int
+	speakerNumber int
+	roles         []asr.SpeakerRole
+	wordInfo      int
+	// vadLevel / noiseThreshold are only applied when non-negative, mirroring
+	// the SDK's "explicit 0 differs from unset" semantics.
+	vadLevel       int
+	noiseThreshold float64
+}
+
+// apply configures the recognizer with the requested options.
+func (o recognizerOptions) apply(r *asr.SpeechRecognizer) {
+	if o.language != "" {
+		r.SetLanguage(o.language)
+	}
+	if o.wordInfo != 0 {
+		r.SetWordInfo(o.wordInfo)
+	}
+	if o.diarization != 0 {
+		r.SetSpeakerDiarization(o.diarization)
+		r.SetSpeakerNumber(o.speakerNumber)
+		if len(o.roles) > 0 {
+			r.SetSpeakerRoles(o.roles)
+		}
+	}
+	if o.vadLevel >= 0 {
+		r.SetVadLevel(o.vadLevel)
+	}
+	if o.noiseThreshold >= 0 {
+		r.SetNoiseThreshold(o.noiseThreshold)
+	}
+}
+
+// parseRoles converts "name=url,name2=url2" into voiceprint enrollment roles.
+func parseRoles(spec string) []asr.SpeakerRole {
+	if spec == "" {
+		return nil
+	}
+	var roles []asr.SpeakerRole
+	for _, entry := range strings.Split(spec, ",") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		name, audioURL, ok := strings.Cut(entry, "=")
+		if !ok {
+			log.Fatalf("Invalid -roles entry %q, expected name=https://url", entry)
+		}
+		roles = append(roles, asr.SpeakerRole{
+			RoleName: strings.TrimSpace(name),
+			AudioUrl: strings.TrimSpace(audioURL),
+		})
+	}
+	return roles
 }
 
 func loadCredentialsFromEnv() {
@@ -155,7 +243,7 @@ func parseEnvInt(name string) int {
 	return number
 }
 
-func processAudio(id int, filePath string, lang string) {
+func processAudio(id int, filePath string, opts recognizerOptions) {
 	file, err := os.Open(filePath)
 	if err != nil {
 		log.Printf("[%d] Failed to open file: %v", id, err)
@@ -179,9 +267,7 @@ func processAudio(id int, filePath string, lang string) {
 	credential := common.NewCredential(AppID, SdkAppID, SecretKey)
 	listener := &MySpeechRecognitionListener{ID: id}
 	recognizer := asr.NewSpeechRecognizer(credential, EngineModelType, listener)
-	if lang != "" {
-		recognizer.SetLanguage(lang)
-	}
+	opts.apply(recognizer)
 
 	if err := recognizer.Start(); err != nil {
 		log.Printf("[%d] Failed to start recognizer: %v", id, err)
