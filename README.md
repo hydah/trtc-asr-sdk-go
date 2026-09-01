@@ -147,6 +147,15 @@ func (l *MyListener) OnSentenceEnd(resp *asr.SpeechRecognitionResponse) {
 - **请求地址**：`https://asr.cloud-rtc.com/v1/SentenceRecognition?{请求参数}`
 - **请求方法**：HTTP POST，Content-Type 为 `application/json; charset=utf-8`
 
+#### 鉴权方式
+
+HTTP 接口的鉴权信息携带在请求 Header 中（与流式不同，不走 query）：
+
+| Header | 说明 |
+|--------|------|
+| `X-TRTC-SdkAppId` | TRTC 应用 ID，从 [TRTC 控制台](https://console.cloud.tencent.com/trtc/app) 获取 |
+| `X-TRTC-UserSig` | TRTC 签名，UserID 等于 URL 参数中的 `RequestId`（SDK 内部自动生成） |
+
 #### URL 请求参数
 
 | 参数 | 必填 | 类型 | 说明 |
@@ -189,7 +198,7 @@ func (l *MyListener) OnSentenceEnd(resp *asr.SpeechRecognitionResponse) {
 - **请求方法**：HTTP POST，Content-Type 为 `application/json; charset=utf-8`
 - **并发限制**：默认 20次/秒
 
-URL 请求参数与一句话识别相同（AppId、Secretid、RequestId、Timestamp）。
+鉴权方式（Header 中的 `X-TRTC-SdkAppId` / `X-TRTC-UserSig`）与 URL 请求参数（AppId、Secretid、RequestId、Timestamp）均与一句话识别相同。
 
 ##### 请求体参数（JSON）
 
