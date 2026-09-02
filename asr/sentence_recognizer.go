@@ -151,7 +151,7 @@ type SentenceRecognizer struct {
 func NewSentenceRecognizer(credential *common.Credential) *SentenceRecognizer {
 	return &SentenceRecognizer{
 		credential: credential,
-		endpoint:   SentenceEndpoint,
+		endpoint:   "",
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
@@ -187,8 +187,12 @@ func (r *SentenceRecognizer) Recognize(req *SentenceRecognitionRequest) (*Senten
 	}
 
 	// Build URL with query parameters
+	base, err := common.ResolveHTTPEndpoint(r.endpoint, common.SiteOf(r.credential))
+	if err != nil {
+		return nil, err
+	}
 	reqURL := fmt.Sprintf("%s/v1/SentenceRecognition?AppId=%d&Secretid=%d&RequestId=%s&Timestamp=%d&%s",
-		r.endpoint,
+		base,
 		r.credential.AppID,
 		r.credential.AppID, // Secretid uses AppID per protocol
 		requestID,

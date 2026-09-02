@@ -276,7 +276,7 @@ func NewSpeechRecognizer(
 	return &SpeechRecognizer{
 		credential:      credential,
 		listener:        listener,
-		endpoint:        Endpoint,
+		endpoint:        "",
 		engineModelType: engineModelType,
 		voiceFormat:     1, // PCM
 		needVad:         1,
@@ -454,6 +454,12 @@ func (r *SpeechRecognizer) SetVoiceID(id string) {
 // It is transparently forwarded to the server as the "language" query parameter.
 func (r *SpeechRecognizer) SetLanguage(lang string) {
 	r.language = lang
+}
+
+// SetEndpoint overrides the WebSocket origin (for testing against a mock
+// server). A non-empty value wins over Credential.Site.
+func (r *SpeechRecognizer) SetEndpoint(endpoint string) {
+	r.endpoint = endpoint
 }
 
 // SetWriteTimeout sets the timeout for a single audio write.
@@ -705,7 +711,11 @@ func (r *SpeechRecognizer) connect() error {
 	// emits usersig so the gateway authenticates without headers.
 	queryString := sigParams.BuildQueryStringWithSignature(userSig)
 	// URL path uses Tencent Cloud AppID (not SdkAppID)
-	wsURL := fmt.Sprintf("%s/asr/v2/%d?%s", r.endpoint, r.credential.AppID, queryString)
+	base, err := common.ResolveWSEndpoint(r.endpoint, common.SiteOf(r.credential))
+	if err != nil {
+		return err
+	}
+	wsURL := fmt.Sprintf("%s/asr/v2/%d?%s", base, r.credential.AppID, queryString)
 
 	// No custom headers: the handshake relies on the query string only, which
 	// also keeps native browser WebSocket usable.

@@ -238,7 +238,7 @@ type FileRecognizer struct {
 func NewFileRecognizer(credential *common.Credential) *FileRecognizer {
 	return &FileRecognizer{
 		credential: credential,
-		endpoint:   FileEndpoint,
+		endpoint:   "",
 		httpClient: &http.Client{
 			Timeout: 60 * time.Second,
 		},
@@ -422,8 +422,12 @@ func (r *FileRecognizer) doRequest(path string, body interface{}) ([]byte, error
 		}
 	}
 
+	base, err := common.ResolveHTTPEndpoint(r.endpoint, common.SiteOf(r.credential))
+	if err != nil {
+		return nil, err
+	}
 	reqURL := fmt.Sprintf("%s%s?AppId=%d&Secretid=%d&RequestId=%s&Timestamp=%d&%s",
-		r.endpoint,
+		base,
 		path,
 		r.credential.AppID,
 		r.credential.AppID, // Secretid uses AppID per protocol
