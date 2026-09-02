@@ -422,13 +422,14 @@ func (r *FileRecognizer) doRequest(path string, body interface{}) ([]byte, error
 		}
 	}
 
-	reqURL := fmt.Sprintf("%s%s?AppId=%d&Secretid=%d&RequestId=%s&Timestamp=%d",
+	reqURL := fmt.Sprintf("%s%s?AppId=%d&Secretid=%d&RequestId=%s&Timestamp=%d&%s",
 		r.endpoint,
 		path,
 		r.credential.AppID,
 		r.credential.AppID, // Secretid uses AppID per protocol
 		requestID,
 		time.Now().Unix(),
+		common.SDKReportQuery(),
 	)
 
 	jsonBody, err := json.Marshal(body)

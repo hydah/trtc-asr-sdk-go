@@ -153,6 +153,11 @@ func (p *SignatureParams) toMap() map[string]string {
 		"voice_format":      fmt.Sprintf("%d", p.VoiceFormat),
 		"needvad":           fmt.Sprintf("%d", p.NeedVad),
 	}
+	// SDK self-identification for server-side diagnostics. Not part of the
+	// signature (the signature is the UserSig), so it is safe to append.
+	for k, v := range SDKReportParams() {
+		m[k] = v
+	}
 	if p.SdkAppID > 0 {
 		m["sdkappid"] = fmt.Sprintf("%d", p.SdkAppID)
 	}

@@ -187,12 +187,13 @@ func (r *SentenceRecognizer) Recognize(req *SentenceRecognitionRequest) (*Senten
 	}
 
 	// Build URL with query parameters
-	reqURL := fmt.Sprintf("%s/v1/SentenceRecognition?AppId=%d&Secretid=%d&RequestId=%s&Timestamp=%d",
+	reqURL := fmt.Sprintf("%s/v1/SentenceRecognition?AppId=%d&Secretid=%d&RequestId=%s&Timestamp=%d&%s",
 		r.endpoint,
 		r.credential.AppID,
 		r.credential.AppID, // Secretid uses AppID per protocol
 		requestID,
 		time.Now().Unix(),
+		common.SDKReportQuery(),
 	)
 
 	// Marshal request body
