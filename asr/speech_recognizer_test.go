@@ -1305,3 +1305,45 @@ func TestSetStopTimeoutClamps(t *testing.T) {
 		t.Fatalf("stopTimeout = %v, want 5s (within bounds, unchanged)", r.stopTimeout)
 	}
 }
+
+type partialListener struct {
+	UnimplementedSpeechRecognitionListener
+	endN int
+}
+
+func (l *partialListener) OnSentenceEnd(resp *SpeechRecognitionResponse) {
+	if resp != nil {
+		l.endN++
+	}
+}
+
+func TestPartialListenerEmbeddingIsEnough(t *testing.T) {
+	l := &partialListener{}
+	r := newRecognizerForTest(l)
+
+	r.listener.OnRecognitionStart(&SpeechRecognitionResponse{})
+	r.listener.OnSentenceBegin(&SpeechRecognitionResponse{})
+	r.listener.OnRecognitionResultChange(&SpeechRecognitionResponse{})
+	r.listener.OnRecognitionComplete(&SpeechRecognitionResponse{})
+	r.listener.OnFail(nil, errors.New("ignored"))
+	r.listener.OnSentenceEnd(&SpeechRecognitionResponse{})
+
+	if l.endN != 1 {
+		t.Fatalf("OnSentenceEnd calls = %d, want 1", l.endN)
+	}
+}
+
+func TestNilListenerIsReplacedWithNoop(t *testing.T) {
+	cred := common.NewCredential(1300000000, 1400000000, "test-secret")
+	r := NewSpeechRecognizer(cred, "16k_zh_en", nil)
+	if r.listener == nil {
+		t.Fatal("nil listener should be replaced with a no-op implementation")
+	}
+
+	r.listener.OnRecognitionStart(&SpeechRecognitionResponse{})
+	r.listener.OnSentenceBegin(&SpeechRecognitionResponse{})
+	r.listener.OnRecognitionResultChange(&SpeechRecognitionResponse{})
+	r.listener.OnSentenceEnd(&SpeechRecognitionResponse{})
+	r.listener.OnRecognitionComplete(&SpeechRecognitionResponse{})
+	r.listener.OnFail(nil, errors.New("ignored"))
+}

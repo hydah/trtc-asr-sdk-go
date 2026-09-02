@@ -51,6 +51,7 @@ const (
 
 // MySpeechRecognitionListener implements the SpeechRecognitionListener interface.
 type MySpeechRecognitionListener struct {
+	asr.UnimplementedSpeechRecognitionListener
 	ID int
 }
 

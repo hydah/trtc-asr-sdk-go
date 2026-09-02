@@ -296,23 +296,13 @@ import (
     "github.com/hydah/trtc-asr-sdk-go/common"
 )
 
-// 实现回调接口
-type MyListener struct{}
+// 只需实现关心的回调；其余事件嵌入 UnimplementedSpeechRecognitionListener 即可。
+type MyListener struct {
+    asr.UnimplementedSpeechRecognitionListener
+}
 
-func (l *MyListener) OnRecognitionStart(resp *asr.SpeechRecognitionResponse) {
-    log.Printf("Recognition started, voice_id: %s", resp.VoiceID)
-}
-func (l *MyListener) OnSentenceBegin(resp *asr.SpeechRecognitionResponse) {
-    log.Printf("Sentence begin, index: %d", resp.Result.Index)
-}
-func (l *MyListener) OnRecognitionResultChange(resp *asr.SpeechRecognitionResponse) {
-    log.Printf("Result: %s", resp.Result.VoiceTextStr)
-}
 func (l *MyListener) OnSentenceEnd(resp *asr.SpeechRecognitionResponse) {
     log.Printf("Sentence end: %s", resp.Result.VoiceTextStr)
-}
-func (l *MyListener) OnRecognitionComplete(resp *asr.SpeechRecognitionResponse) {
-    log.Printf("Complete, voice_id: %s", resp.VoiceID)
 }
 func (l *MyListener) OnFail(resp *asr.SpeechRecognitionResponse, err error) {
     log.Printf("Failed: %v", err)

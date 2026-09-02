@@ -55,6 +55,9 @@ const (
 )
 
 // SpeechRecognitionListener defines the callback interface for speech recognition events.
+//
+// Callers that only care about a subset of events can embed
+// UnimplementedSpeechRecognitionListener and override the methods they need.
 type SpeechRecognitionListener interface {
 	// OnRecognitionStart is called when the recognition session starts successfully.
 	OnRecognitionStart(response *SpeechRecognitionResponse)
@@ -69,6 +72,25 @@ type SpeechRecognitionListener interface {
 	// OnFail is called when an error occurs during recognition.
 	OnFail(response *SpeechRecognitionResponse, err error)
 }
+
+// UnimplementedSpeechRecognitionListener is a no-op SpeechRecognitionListener.
+// Embed it and override only the events you care about:
+//
+//	type MyListener struct {
+//	    asr.UnimplementedSpeechRecognitionListener
+//	}
+//	func (l *MyListener) OnSentenceEnd(resp *SpeechRecognitionResponse) { ... }
+type UnimplementedSpeechRecognitionListener struct{}
+
+func (UnimplementedSpeechRecognitionListener) OnRecognitionStart(*SpeechRecognitionResponse)        {}
+func (UnimplementedSpeechRecognitionListener) OnSentenceBegin(*SpeechRecognitionResponse)           {}
+func (UnimplementedSpeechRecognitionListener) OnRecognitionResultChange(*SpeechRecognitionResponse) {}
+func (UnimplementedSpeechRecognitionListener) OnSentenceEnd(*SpeechRecognitionResponse)             {}
+func (UnimplementedSpeechRecognitionListener) OnRecognitionComplete(*SpeechRecognitionResponse)     {}
+func (UnimplementedSpeechRecognitionListener) OnFail(*SpeechRecognitionResponse, error)             {}
+
+var _ SpeechRecognitionListener = UnimplementedSpeechRecognitionListener{}
+var _ SpeechRecognitionListener = (*UnimplementedSpeechRecognitionListener)(nil)
 
 // SpeechRecognitionResponse represents a response message from the ASR service.
 type SpeechRecognitionResponse struct {
@@ -240,12 +262,17 @@ type SpeechRecognizer struct {
 // Parameters:
 //   - credential: TRTC authentication credential
 //   - engineModelType: recognition engine model (e.g., "16k_zh", "8k_zh", "16k_zh_en")
-//   - listener: callback listener for recognition events
+//   - listener: callback listener for recognition events. A nil listener is
+//     replaced with UnimplementedSpeechRecognitionListener so the SDK never
+//     panics on a missing callback.
 func NewSpeechRecognizer(
 	credential *common.Credential,
 	engineModelType string,
 	listener SpeechRecognitionListener,
 ) *SpeechRecognizer {
+	if listener == nil {
+		listener = UnimplementedSpeechRecognitionListener{}
+	}
 	return &SpeechRecognizer{
 		credential:      credential,
 		listener:        listener,
